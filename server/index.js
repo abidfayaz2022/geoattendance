@@ -30,7 +30,7 @@ app.use("/api", createRouter());
 
 // Static client (for production build)
 serveStaticAssets(app, {
-  distDir: path.join(__dirname, "..", "dist/public"),
+  distDir: path.join(__dirname, "..", "dist"),
   indexFile: "index.html",
 });
 
