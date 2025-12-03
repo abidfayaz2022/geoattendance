@@ -123,24 +123,12 @@ export function createRouter() {
     }
   });
 
+
   // ─────────────────────────
   // STUDENT APIs
   // ─────────────────────────
 
-  /**
-   * POST /student/attendance/check-in
-   * Body: {
-   *   studentId: number,
-   *   lat: number,
-   *   lng: number,
-   *   accuracy?: number,
-   *   deviceId?: string
-   * }
-   *
-   * Uses the student's center (from students.centerId) as the geofence:
-   * center.lat/lng + center.radiusMeters
-   */
-  router.post("/student/attendance/check-in", async (req, res) => {
+   router.post("/student/attendance/check-in", async (req, res) => {
     try {
       const { studentId, lat, lng, accuracy, deviceId } = req.body || {};
 
@@ -174,6 +162,41 @@ export function createRouter() {
         return res.status(404).json({ error: "center_not_found" });
       }
 
+      // ---- Prevent multiple check-ins per day (matches 409 handling in UI)
+      const now = new Date();
+      const todayStart = new Date(
+        Date.UTC(
+          now.getUTCFullYear(),
+          now.getUTCMonth(),
+          now.getUTCDate(),
+          0,
+          0,
+          0
+        )
+      );
+      const tomorrowStart = new Date(todayStart);
+      tomorrowStart.setUTCDate(todayStart.getUTCDate() + 1);
+
+      const [existingToday] = await db
+        .select({ id: attendanceRecords.id })
+        .from(attendanceRecords)
+        .where(
+          and(
+            eq(attendanceRecords.studentId, student.id),
+            gte(attendanceRecords.checkInAt, todayStart),
+            lt(attendanceRecords.checkInAt, tomorrowStart)
+          )
+        );
+
+      if (existingToday) {
+        return res.status(409).json({
+          error: "already_checked_in",
+          message: "You have already marked attendance for today.",
+        });
+      }
+      // ---- END: duplicate check
+
+      // Check distance from center
       const distanceMeters = haversine(
         Number(center.lat),
         Number(center.lng),
@@ -192,11 +215,9 @@ export function createRouter() {
         });
       }
 
-      const now = new Date();
       const ipAddress = req.ip || req.headers["x-forwarded-for"] || null;
       const userAgent = req.headers["user-agent"] || null;
 
-      // New record each check-in (your schema has no unique constraint)
       const [record] = await db
         .insert(attendanceRecords)
         .values({
@@ -224,6 +245,70 @@ export function createRouter() {
       res.status(500).json({ error: "student_check_in_failed" });
     }
   });
+
+
+
+    /**
+   * GET /student/geofence?studentId=123
+   *
+   * Returns the geofence for the student's center:
+   * {
+   *   centerId,
+   *   centerName,
+   *   centerLat,
+   *   centerLng,
+   *   radiusMeters
+   * }
+   */
+  router.get("/student/geofence", async (req, res) => {
+    try {
+      const studentId = Number(req.query.studentId);
+
+      if (!studentId) {
+        return res.status(400).json({ error: "studentId_required" });
+      }
+
+      // Find the student
+      const [student] = await db
+        .select()
+        .from(students)
+        .where(eq(students.id, studentId));
+
+      if (!student) {
+        return res.status(404).json({ error: "student_not_found" });
+      }
+
+      // Get their center
+      const [center] = await db
+        .select()
+        .from(centers)
+        .where(eq(centers.id, student.centerId));
+
+      if (!center) {
+        return res.status(404).json({ error: "center_not_found" });
+      }
+
+      if (
+        center.lat == null ||
+        center.lng == null ||
+        center.radiusMeters == null
+      ) {
+        return res.status(400).json({ error: "center_geofence_not_configured" });
+      }
+
+      res.json({
+        centerId: center.id,
+        centerName: center.name,
+        centerLat: Number(center.lat),
+        centerLng: Number(center.lng),
+        radiusMeters: Number(center.radiusMeters),
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "student_geofence_failed" });
+    }
+  });
+
 
   /**
    * GET /student/attendance-history?studentId=123
