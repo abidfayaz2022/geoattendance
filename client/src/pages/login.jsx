@@ -207,20 +207,7 @@ function LoginFormFields({
         )}
       </Button>
 
-      <div className="mt-4 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg text-xs text-blue-600 dark:text-blue-400 border border-blue-100 dark:border-blue-900/50">
-        <p className="font-semibold mb-1">Demo Credentials:</p>
-        <div className="grid grid-cols-2 gap-2">
-          <span>
-            Student: <strong>john</strong>
-          </span>
-          <span>
-            Admin: <strong>admin</strong>
-          </span>
-          <span className="col-span-2">
-            Password: <strong>any (3+ chars)</strong>
-          </span>
-        </div>
-      </div>
+      
     </form>
   );
 }
