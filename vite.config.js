@@ -43,7 +43,7 @@ export default defineConfig({
     // 👇 this is the important new part
     proxy: {
       "/api": {
-        target: "http://localhost:4000",
+        target: "https://geoattendance-asi9.onrender.com",
         changeOrigin: true,
         secure: false,
       },

@@ -2,8 +2,8 @@
 import { QueryClient } from "@tanstack/react-query";
 
 // Read API base URL from env; fallback to same-origin relative if not set
-// Example .env: VITE_API_BASE_URL="http://localhost:4000/api"
-export const API_BASE_URL = "http://localhost:4000/api" || "";
+// Example .env: VITE_API_BASE_URL="https://geoattendance-asi9.onrender.com/api"
+export const API_BASE_URL = "https://geoattendance-asi9.onrender.com/api" || "";
 
 /**
  * Build a full URL from a relative path or segments.
@@ -13,7 +13,7 @@ export const API_BASE_URL = "http://localhost:4000/api" || "";
  * - If API_BASE_URL is empty, uses the path as-is (same-origin, no prefix).
  *
  * Examples:
- *   buildUrl("/auth/login")            -> "http://localhost:4000/api/auth/login"
+ *   buildUrl("/auth/login")            -> "https://geoattendance-asi9.onrender.com/api/auth/login"
  *   buildUrl(["student", "attendance"]) -> "http://.../api/student/attendance"
  */
 export function buildUrl(pathOrSegments) {
