@@ -31,6 +31,7 @@ export default function StudentDashboard() {
   const { toast } = useToast();
 
   const [currentLocation, setCurrentLocation] = useState(null);
+  console.log("current locaiton",currentLocation);
   const [distance, setDistance] = useState(null);
   const [inRange, setInRange] = useState(false);
 
@@ -42,6 +43,7 @@ export default function StudentDashboard() {
   const [loadingGeofence, setLoadingGeofence] = useState(true);
 
   const studentId = user?.id || null;
+  console.log('askdfl',studentId);
 
   // Redirect if not logged in
   useEffect(() => {
@@ -384,31 +386,34 @@ export default function StudentDashboard() {
           <CardContent className="space-y-6">
             <div className="flex flex-col items-center justify-center py-4">
               <div className="relative">
-                {/* Ripple Effect when in range */}
-                {inRange && (
-                  <>
-                    <div className="absolute inset-0 rounded-full bg-green-500/20 animate-ping duration-1000" />
-                    <div className="absolute inset-[-10px] rounded-full bg-green-500/10 animate-pulse duration-2000" />
-                  </>
-                )}
+  {inRange && (
+    <>
+      <div className="pointer-events-none absolute inset-0 rounded-full bg-green-500/20 animate-ping duration-1000" />
+      <div className="pointer-events-none absolute inset-[-10px] rounded-full bg-green-500/10 animate-pulse duration-2000" />
+    </>
+  )}
 
-                <Button
-                  size="lg"
-                  className={`w-40 h-40 rounded-full flex flex-col gap-2 text-lg font-bold shadow-xl transition-all active:scale-95
-                    ${
-                      inRange
-                        ? "bg-gradient-to-b from-green-500 to-green-600 hover:from-green-400 hover:to-green-500 border-4 border-green-100"
-                        : "bg-slate-200 text-slate-400 cursor-not-allowed hover:bg-slate-200 border-4 border-slate-100"
-                    }`}
-                  disabled={!inRange}
-                  onClick={markAttendance}
-                >
-                  <MapPin
-                    className={`w-10 h-10 ${inRange ? "animate-bounce" : ""}`}
-                  />
-                  {inRange ? "CHECK IN" : "TOO FAR"}
-                </Button>
-              </div>
+  <Button
+    size="lg"
+    className={`w-40 h-40 rounded-full flex flex-col gap-2 text-lg font-bold shadow-xl transition-all active:scale-95
+      ${
+        inRange
+          ? "bg-gradient-to-b from-green-500 to-green-600 hover:from-green-400 hover:to-green-500 border-4 border-green-100"
+          : "bg-slate-200 text-slate-400 hover:bg-slate-200 border-4 border-slate-100"
+      }`}
+    onClick={() => {
+      if (!inRange) {
+        // optional toast here
+        return;
+      }
+      markAttendance();
+    }}
+  >
+    <MapPin className={`w-10 h-10 ${inRange ? "animate-bounce" : ""}`} />
+    {inRange ? "CHECK IN" : "TOO FAR"}
+  </Button>
+</div>
+
 
               <div className="mt-6 text-center space-y-1">
                 <p className="text-sm font-medium text-slate-600 dark:text-slate-300 flex items-center justify-center gap-2">

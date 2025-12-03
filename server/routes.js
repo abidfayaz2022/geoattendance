@@ -2,7 +2,12 @@
 import express from "express";
 import { and, eq, desc, gte, lt, sql } from "drizzle-orm";
 import { db } from "./storage.js";
-import { centers, users, students, attendanceRecords } from "../shared/schema.js";
+import {
+  centers,
+  users,
+  students,
+  attendanceRecords,
+} from "../shared/schema.js";
 
 export function createRouter() {
   const router = express.Router();
@@ -47,16 +52,23 @@ export function createRouter() {
           .json({ error: "centerId_required_for_student" });
       }
 
-      // TODO: hash password properly (bcrypt)
+      // For MySQL, .returning() is not supported
+      const userInsertResult = await db.insert(users).values({
+        name,
+        email,
+        passwordHash: password, // TODO: hash password properly (bcrypt)
+        role,
+      });
+
+      const userId = userInsertResult.insertId;
       const [user] = await db
-        .insert(users)
-        .values({
-          name,
-          email,
-          passwordHash: password,
-          role,
-        })
-        .returning();
+        .select()
+        .from(users)
+        .where(eq(users.id, userId));
+
+      if (!user) {
+        return res.status(500).json({ error: "user_creation_failed" });
+      }
 
       let studentProfile = null;
 
@@ -71,17 +83,20 @@ export function createRouter() {
           return res.status(400).json({ error: "center_not_found" });
         }
 
-        const [student] = await db
-          .insert(students)
-          .values({
-            userId: user.id,
-            centerId: center.id,
-            grade: grade || null,
-            rollNumber: rollNumber || null,
-          })
-          .returning();
+        const studentInsertResult = await db.insert(students).values({
+          userId: user.id,
+          centerId: center.id,
+          grade: grade || null,
+          rollNumber: rollNumber || null,
+        });
 
-        studentProfile = student;
+        const studentId = studentInsertResult.insertId;
+        const [student] = await db
+          .select()
+          .from(students)
+          .where(eq(students.id, studentId));
+
+        studentProfile = student || null;
       }
 
       res.json({ user, student: studentProfile });
@@ -123,12 +138,26 @@ export function createRouter() {
     }
   });
 
-
   // ─────────────────────────
   // STUDENT APIs
   // ─────────────────────────
 
-   router.post("/student/attendance/check-in", async (req, res) => {
+  /**
+   * POST /student/attendance/check-in
+   * Body: {
+   *   studentId: number, // actually userId from frontend
+   *   lat: number,
+   *   lng: number,
+   *   accuracy?: number,
+   *   deviceId?: string
+   * }
+   *
+   * Uses the student's center (from students.centerId) as the geofence:
+   * center.lat/lng + center.radiusMeters
+   * - Enforces 1 check-in per day (409)
+   * - Enforces radius on server side
+   */
+  router.post("/student/attendance/check-in", async (req, res) => {
     try {
       const { studentId, lat, lng, accuracy, deviceId } = req.body || {};
 
@@ -142,11 +171,13 @@ export function createRouter() {
         return res.status(400).json({ error: "missing_check_in_data" });
       }
 
-      // who is checking in?
+      const studentUserId = Number(studentId);
+
+      // who is checking in? (student linked by userId)
       const [student] = await db
         .select()
         .from(students)
-        .where(eq(students.id, Number(studentId)));
+        .where(eq(students.userId, studentUserId));
 
       if (!student) {
         return res.status(404).json({ error: "student_not_found" });
@@ -160,6 +191,16 @@ export function createRouter() {
 
       if (!center) {
         return res.status(404).json({ error: "center_not_found" });
+      }
+
+      if (
+        center.lat == null ||
+        center.lng == null ||
+        center.radiusMeters == null
+      ) {
+        return res
+          .status(400)
+          .json({ error: "center_geofence_not_configured" });
       }
 
       // ---- Prevent multiple check-ins per day (matches 409 handling in UI)
@@ -218,9 +259,32 @@ export function createRouter() {
       const ipAddress = req.ip || req.headers["x-forwarded-for"] || null;
       const userAgent = req.headers["user-agent"] || null;
 
-      const [record] = await db
-        .insert(attendanceRecords)
-        .values({
+      // MySQL: no returning(); use insertId
+      const insertResult = await db.insert(attendanceRecords).values({
+        studentId: student.id,
+        centerId: center.id,
+        checkInAt: now,
+        status: "present",
+        checkInLat: Number(lat),
+        checkInLng: Number(lng),
+        checkInAccuracy: accuracy != null ? Number(accuracy) : null,
+        distanceFromCenterMeters: distanceMeters,
+        deviceId: deviceId || null,
+        ipAddress,
+        userAgent,
+      });
+
+      const newId = insertResult.insertId;
+
+      let [record] = await db
+        .select()
+        .from(attendanceRecords)
+        .where(eq(attendanceRecords.id, newId));
+
+      if (!record) {
+        // Fallback if select fails for some reason
+        record = {
+          id: newId,
           studentId: student.id,
           centerId: center.id,
           checkInAt: now,
@@ -232,8 +296,8 @@ export function createRouter() {
           deviceId: deviceId || null,
           ipAddress,
           userAgent,
-        })
-        .returning();
+        };
+      }
 
       res.json({
         ok: true,
@@ -246,9 +310,7 @@ export function createRouter() {
     }
   });
 
-
-
-    /**
+  /**
    * GET /student/geofence?studentId=123
    *
    * Returns the geofence for the student's center:
@@ -259,20 +321,22 @@ export function createRouter() {
    *   centerLng,
    *   radiusMeters
    * }
+   *
+   * NOTE: studentId is user.id from frontend
    */
   router.get("/student/geofence", async (req, res) => {
     try {
-      const studentId = Number(req.query.studentId);
+      const studentUserId = Number(req.query.studentId);
 
-      if (!studentId) {
+      if (!studentUserId) {
         return res.status(400).json({ error: "studentId_required" });
       }
 
-      // Find the student
+      // Find the student by userId
       const [student] = await db
         .select()
         .from(students)
-        .where(eq(students.id, studentId));
+        .where(eq(students.userId, studentUserId));
 
       if (!student) {
         return res.status(404).json({ error: "student_not_found" });
@@ -293,7 +357,9 @@ export function createRouter() {
         center.lng == null ||
         center.radiusMeters == null
       ) {
-        return res.status(400).json({ error: "center_geofence_not_configured" });
+        return res
+          .status(400)
+          .json({ error: "center_geofence_not_configured" });
       }
 
       res.json({
@@ -309,16 +375,27 @@ export function createRouter() {
     }
   });
 
-
   /**
    * GET /student/attendance-history?studentId=123
    * Returns recent attendance records for one student.
+   *
+   * NOTE: studentId is user.id from frontend
    */
   router.get("/student/attendance-history", async (req, res) => {
     try {
-      const studentId = Number(req.query.studentId);
-      if (!studentId) {
+      const studentUserId = Number(req.query.studentId);
+      if (!studentUserId) {
         return res.status(400).json({ error: "studentId_required" });
+      }
+
+      // Resolve the student by userId
+      const [student] = await db
+        .select()
+        .from(students)
+        .where(eq(students.userId, studentUserId));
+
+      if (!student) {
+        return res.status(404).json({ error: "student_not_found" });
       }
 
       const rows = await db
@@ -330,7 +407,7 @@ export function createRouter() {
           checkInLng: attendanceRecords.checkInLng,
         })
         .from(attendanceRecords)
-        .where(eq(attendanceRecords.studentId, studentId))
+        .where(eq(attendanceRecords.studentId, student.id))
         .orderBy(desc(attendanceRecords.checkInAt))
         .limit(50);
 
