@@ -43,7 +43,7 @@ export default defineConfig({
     // 👇 this is the important new part
     proxy: {
       "/api": {
-        target: "http://localhost:4000",
+        target: "https://geoattendance-zeta.vercel.app",
         changeOrigin: true,
         secure: false,
       },
