@@ -17,13 +17,15 @@ import {
   CheckCircle2,
   RefreshCw,
   History,
+  Download,
+  LogOut as LogoutIcon,
 } from "lucide-react";
-// import { motion } from "framer-motion"; // not used currently
 import { format } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
 
 const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || "https://geoattendance-asi9.onrender.com/api";
+  import.meta.env.VITE_API_BASE_URL ||
+  "https://geoattendance-asi9.onrender.com/api";
 
 export default function StudentDashboard() {
   const { user, logout } = useAuth();
@@ -31,7 +33,6 @@ export default function StudentDashboard() {
   const { toast } = useToast();
 
   const [currentLocation, setCurrentLocation] = useState(null);
-  console.log("current locaiton",currentLocation);
   const [distance, setDistance] = useState(null);
   const [inRange, setInRange] = useState(false);
 
@@ -42,8 +43,15 @@ export default function StudentDashboard() {
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [loadingGeofence, setLoadingGeofence] = useState(true);
 
+  // NEW: checkout loading state
+  const [loadingCheckout, setLoadingCheckout] = useState(false);
+
+  // NEW: student report export state
+  const [reportFrom, setReportFrom] = useState("");
+  const [reportTo, setReportTo] = useState("");
+  const [reportLoading, setReportLoading] = useState(false);
+
   const studentId = user?.id || null;
-  console.log('askdfl',studentId);
 
   // Redirect if not logged in
   useEffect(() => {
@@ -124,7 +132,8 @@ export default function StudentDashboard() {
 
     const a =
       Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-      Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+      Math.cos(φ1) * Math.cos(φ2) *
+        Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 
     return R * c;
@@ -253,7 +262,6 @@ export default function StudentDashboard() {
           lat: currentLocation.lat,
           lng: currentLocation.lng,
           accuracy: currentLocation.accuracy,
-          // deviceId: you can send something here if you want
         }),
       });
 
@@ -276,7 +284,6 @@ export default function StudentDashboard() {
       const data = await res.json();
       const rec = data.record || data;
 
-      // Normalise the record to the same shape as history items
       const historyItem = {
         id: rec.id,
         date: rec.checkInAt || rec.date || new Date(),
@@ -317,6 +324,171 @@ export default function StudentDashboard() {
           err?.message ||
           "Something went wrong while marking attendance. Please try again.",
       });
+    }
+  };
+
+  // NEW: checkout handler
+  const markCheckout = async () => {
+    if (!user || !studentId) return;
+
+    if (!geofence) {
+      toast({
+        variant: "destructive",
+        title: "Not Configured",
+        description:
+          "Attendance location rules are not configured yet. Please contact admin.",
+      });
+      return;
+    }
+
+    if (!currentLocation) {
+      toast({
+        variant: "destructive",
+        title: "Location Required",
+        description:
+          "Please refresh your GPS location before checking out.",
+      });
+      return;
+    }
+
+    // optional: enforce in-range for checkout as well
+    if (!inRange) {
+      toast({
+        variant: "destructive",
+        title: "Too Far",
+        description:
+          "You must be within the allowed radius of campus to check out.",
+      });
+      return;
+    }
+
+    try {
+      setLoadingCheckout(true);
+
+      const res = await fetch(`${API_BASE_URL}/student/attendance/check-out`, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          studentId,
+          lat: currentLocation.lat,
+          lng: currentLocation.lng,
+          accuracy: currentLocation.accuracy,
+        }),
+      });
+
+      if (res.status === 409) {
+        const body = await res.json().catch(() => ({}));
+        toast({
+          variant: "destructive",
+          title: "Already Checked Out",
+          description:
+            body?.message || "You have already checked out for today.",
+        });
+        return;
+      }
+
+      if (!res.ok) {
+        const txt = (await res.text()) || res.statusText;
+        throw new Error(txt);
+      }
+
+      const data = await res.json();
+      const rec = data.record || data;
+
+      const checkoutTime = rec.checkOutAt
+        ? new Date(rec.checkOutAt)
+        : new Date();
+
+      toast({
+        title: "Checked Out!",
+        description: `Checked out successfully at ${format(
+          checkoutTime,
+          "hh:mm a"
+        )}`,
+        className:
+          "bg-slate-50 border-slate-200 text-slate-800 dark:bg-slate-900/30 dark:border-slate-800",
+      });
+
+      // Optional: you could refresh attendance history here by re-fetching,
+      // or attach checkout info to the last record.
+    } catch (err) {
+      console.error("Failed to check out:", err);
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description:
+          err?.message ||
+          "Something went wrong while checking out. Please try again.",
+      });
+    } finally {
+      setLoadingCheckout(false);
+    }
+  };
+
+  // NEW: student attendance report CSV export
+  const exportAttendanceReport = async () => {
+    if (!studentId) return;
+
+    if (!reportFrom || !reportTo) {
+      toast({
+        variant: "destructive",
+        title: "Date Range Required",
+        description: "Please select both start and end dates to export report.",
+      });
+      return;
+    }
+
+    try {
+      setReportLoading(true);
+
+      const params = new URLSearchParams({
+        studentId: String(studentId),
+        from: reportFrom,
+        to: reportTo,
+        format: "csv",
+      });
+
+      const url = `${API_BASE_URL}/student/attendance/report?${params.toString()}`;
+
+      const res = await fetch(url, {
+        method: "GET",
+        credentials: "include",
+      });
+
+      if (!res.ok) {
+        const txt = (await res.text()) || res.statusText;
+        throw new Error(txt);
+      }
+
+      const blob = await res.blob();
+      const href = window.URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = href;
+      a.download = `attendance_${reportFrom}_to_${reportTo}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(href);
+
+      toast({
+        title: "Report Downloaded",
+        description: "Your attendance report has been downloaded as a CSV.",
+      });
+    } catch (err) {
+      console.error("Failed to export report:", err);
+      toast({
+        variant: "destructive",
+        title: "Export Failed",
+        description:
+          err?.message ||
+          "Could not export your attendance report. Please try again.",
+      });
+    } finally {
+      setReportLoading(false);
     }
   };
 
@@ -386,34 +558,42 @@ export default function StudentDashboard() {
           <CardContent className="space-y-6">
             <div className="flex flex-col items-center justify-center py-4">
               <div className="relative">
-  {inRange && (
-    <>
-      <div className="pointer-events-none absolute inset-0 rounded-full bg-green-500/20 animate-ping duration-1000" />
-      <div className="pointer-events-none absolute inset-[-10px] rounded-full bg-green-500/10 animate-pulse duration-2000" />
-    </>
-  )}
+                {inRange && (
+                  <>
+                    <div className="pointer-events-none absolute inset-0 rounded-full bg-green-500/20 animate-ping duration-1000" />
+                    <div className="pointer-events-none absolute inset-[-10px] rounded-full bg-green-500/10 animate-pulse duration-2000" />
+                  </>
+                )}
 
-  <Button
-    size="lg"
-    className={`w-40 h-40 rounded-full flex flex-col gap-2 text-lg font-bold shadow-xl transition-all active:scale-95
+                <Button
+                  size="lg"
+                  className={`w-40 h-40 rounded-full flex flex-col gap-2 text-lg font-bold shadow-xl transition-all active:scale-95
       ${
         inRange
           ? "bg-gradient-to-b from-green-500 to-green-600 hover:from-green-400 hover:to-green-500 border-4 border-green-100"
           : "bg-slate-200 text-slate-400 hover:bg-slate-200 border-4 border-slate-100"
       }`}
-    onClick={() => {
-      if (!inRange) {
-        // optional toast here
-        return;
-      }
-      markAttendance();
-    }}
-  >
-    <MapPin className={`w-10 h-10 ${inRange ? "animate-bounce" : ""}`} />
-    {inRange ? "CHECK IN" : "TOO FAR"}
-  </Button>
-</div>
-
+                  onClick={() => {
+                    if (!inRange) {
+                      toast({
+                        variant: "destructive",
+                        title: "Too Far to Check In",
+                        description:
+                          "Move closer to campus and refresh GPS to check in.",
+                      });
+                      return;
+                    }
+                    markAttendance();
+                  }}
+                >
+                  <MapPin
+                    className={`w-10 h-10 ${
+                      inRange ? "animate-bounce" : ""
+                    }`}
+                  />
+                  {inRange ? "CHECK IN" : "TOO FAR"}
+                </Button>
+              </div>
 
               <div className="mt-6 text-center space-y-1">
                 <p className="text-sm font-medium text-slate-600 dark:text-slate-300 flex items-center justify-center gap-2">
@@ -445,7 +625,7 @@ export default function StudentDashboard() {
             </div>
 
             {/* Controls */}
-            <div className="flex gap-2 justify-center">
+            <div className="flex flex-wrap gap-2 justify-center">
               <Button
                 variant="outline"
                 size="sm"
@@ -465,6 +645,20 @@ export default function StudentDashboard() {
                 onClick={teleportToSchool}
               >
                 Simulate "At School"
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="border-slate-300"
+                onClick={markCheckout}
+                disabled={loadingCheckout}
+              >
+                <LogoutIcon
+                  className={`w-3 h-3 mr-2 ${
+                    loadingCheckout ? "animate-spin" : ""
+                  }`}
+                />
+                {loadingCheckout ? "Checking Out…" : "Check Out"}
               </Button>
             </div>
           </CardContent>
@@ -525,6 +719,55 @@ export default function StudentDashboard() {
             </ScrollArea>
           </Card>
         </div>
+
+        {/* Student Attendance Report Export */}
+        <section>
+          <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
+            <Download className="w-5 h-5 text-primary" />
+            Attendance Report
+          </h2>
+          <Card>
+            <CardContent className="p-4 space-y-3">
+              <p className="text-xs text-muted-foreground">
+                Download a CSV report of your attendance for a selected date
+                range. You can open it in Excel or Google Sheets.
+              </p>
+              <div className="grid gap-3 sm:grid-cols-[1fr,1fr,auto] items-end">
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    From date
+                  </label>
+                  <input
+                    type="date"
+                    value={reportFrom}
+                    onChange={(e) => setReportFrom(e.target.value)}
+                    className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    To date
+                  </label>
+                  <input
+                    type="date"
+                    value={reportTo}
+                    onChange={(e) => setReportTo(e.target.value)}
+                    className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary"
+                  />
+                </div>
+                <Button
+                  size="sm"
+                  className="mt-2 sm:mt-0"
+                  onClick={exportAttendanceReport}
+                  disabled={reportLoading}
+                >
+                  <Download className="w-4 h-4 mr-2" />
+                  {reportLoading ? "Exporting…" : "Download CSV"}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </section>
       </main>
     </div>
   );

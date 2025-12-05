@@ -16,17 +16,13 @@ import AdminDashboard from "@/pages/admin-dashboard";
 function ProtectedRoute({ component: Component, role }) {
   const { user } = useAuth();
 
-  // Not logged in → send to login
   if (!user) {
     return <Redirect to="/" />;
   }
 
-  // If a specific role is required and doesn't match → bounce appropriately
   if (role && user.role !== role) {
-    // Basic behavior: send student to /student, admin to /admin
     if (user.role === "admin") return <Redirect to="/admin" />;
     if (user.role === "student") return <Redirect to="/student" />;
-    // Fallback
     return <Redirect to="/" />;
   }
 
@@ -38,13 +34,12 @@ function Router() {
     <Switch>
       <Route path="/" component={LoginPage} />
       <Route path="/student">
-        {/* Require any logged-in user with role "student" */}
         <ProtectedRoute component={StudentDashboard} role="student" />
       </Route>
       <Route path="/admin">
-        {/* Require role "admin" */}
         <ProtectedRoute component={AdminDashboard} role="admin" />
       </Route>
+      {/* Catch-all route */}
       <Route component={NotFound} />
     </Switch>
   );

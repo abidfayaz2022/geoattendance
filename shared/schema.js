@@ -65,6 +65,7 @@ export const students = mysqlTable("students", {
 //    Each check-in at a centre by a student
 //
 
+// shared/schema.js
 export const attendanceRecords = mysqlTable("attendance_records", {
   id: int("id").primaryKey().autoincrement(),
 
@@ -80,16 +81,26 @@ export const attendanceRecords = mysqlTable("attendance_records", {
   checkInAt: datetime("check_in_at").notNull(),
   status: varchar("status", { length: 32 })
     .notNull()
-    .default("present"), // you can later use 'late', 'absent', etc.
+    .default("present"), // can later be 'late', 'absent', etc.
 
-  // geo telemetry
+  // geo telemetry (check-in)
   checkInLat: double("check_in_lat"),
   checkInLng: double("check_in_lng"),
   checkInAccuracy: double("check_in_accuracy"),
   distanceFromCenterMeters: double("distance_from_center_meters"),
+
+  // CHECK-OUT FIELDS (new)
+  checkOutAt: datetime("check_out_at"),              // nullable if never checked out
+  checkOutLat: double("check_out_lat"),
+  checkOutLng: double("check_out_lng"),
+  checkOutAccuracy: double("check_out_accuracy"),
+  distanceFromCenterCheckoutMeters: double(
+    "distance_from_center_checkout_meters"
+  ),
 
   // device / audit
   deviceId: varchar("device_id", { length: 255 }),
   ipAddress: varchar("ip_address", { length: 255 }),
   userAgent: text("user_agent"),
 });
+
