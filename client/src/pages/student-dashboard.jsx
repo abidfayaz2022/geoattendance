@@ -201,21 +201,7 @@ export default function StudentDashboard() {
     }
   };
 
-  // Optional dev helper: pretend we stand at center of geofence
-  const teleportToSchool = () => {
-    if (!geofence) return;
-
-    const lat = Number(geofence.centerLat);
-    const lng = Number(geofence.centerLng);
-
-    setCurrentLocation({ lat, lng, accuracy: 0 });
-    setDistance(0);
-    setInRange(true);
-    toast({
-      title: "Location Updated",
-      description: "Simulated: you are now at the school location.",
-    });
-  };
+  
 
   const markAttendance = async () => {
     if (!user || !studentId) return;
@@ -639,13 +625,7 @@ export default function StudentDashboard() {
                 />
                 Refresh GPS
               </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={teleportToSchool}
-              >
-                Simulate "At School"
-              </Button>
+              
               <Button
                 variant="outline"
                 size="sm"

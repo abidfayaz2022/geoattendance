@@ -5,7 +5,8 @@ const AuthContext = createContext(null);
 
 // Read API base URL from env; fallback to same as other frontend code
 const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || "https://geoattendance-asi9.onrender.com/api";
+  import.meta.env.VITE_API_BASE_URL ||
+  "https://geoattendance-asi9.onrender.com/api";
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
@@ -31,11 +32,12 @@ export function AuthProvider({ children }) {
    * Login against backend
    * Backend route: POST /auth/login
    * Body: { email, password }
-   * Response (recommended): { user, student? }
-   *   - user: row from users table
-   *   - student: row from students table (for role === "student")
+   * Response: { user, student? }  OR just { id, name, email, role, ... }
+   *
+   * expectedRole (optional): "student" | "admin"
+   * - Use this to enforce that /admin only logs in admins, and "/" only students.
    */
-  const login = async (email, password) => {
+  const login = async (email, password, expectedRole) => {
     setAuthError(null);
 
     try {
@@ -72,6 +74,18 @@ export function AuthProvider({ children }) {
         }),
       };
 
+      const role = loggedInUser.role;
+
+      // If a specific portal is expected (student/admin) and the role doesn't match, block login
+      if (expectedRole && role !== expectedRole) {
+        setAuthError(
+          expectedRole === "admin"
+            ? "This account is not an admin. Please use the student login page."
+            : "This account is not a student. Please use the admin login page."
+        );
+        return false;
+      }
+
       setUser(loggedInUser);
 
       try {
@@ -80,8 +94,7 @@ export function AuthProvider({ children }) {
         console.warn("Failed to persist user in localStorage:", err);
       }
 
-      // Route based on role
-      const role = loggedInUser.role;
+      // Route based on actual role
       if (role === "admin") {
         setLocation("/admin");
       } else {

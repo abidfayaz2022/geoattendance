@@ -1107,7 +1107,7 @@ export function createRouter() {
 
 
 
-    /**
+     /**
    * POST /admin/students
    * Body: { name, email, password, centerId, grade?, rollNumber? }
    */
@@ -1130,15 +1130,35 @@ export function createRouter() {
         return res.status(400).json({ error: "center_not_found" });
       }
 
-      // TODO: hash password using bcrypt in real prod
+      const normalizedEmail = String(email).toLowerCase().trim();
+
+      // 1) Check if user with this email already exists
+      const [existingUser] = await db
+        .select()
+        .from(users)
+        .where(eq(users.email, normalizedEmail));
+
+      if (existingUser) {
+        // You can decide behaviour:
+        // - either treat as error:
+        return res.status(409).json({ error: "user_already_exists" });
+
+        // OR:
+        // - attach a student profile to existing user if they don't have one.
+        // I'll keep it simple with the 409 above.
+      }
+
+      // 2) Create user
       const userInsertResult = await db.insert(users).values({
         name,
-        email,
-        passwordHash: password,
+        email: normalizedEmail,
+        passwordHash: password, // TODO: bcrypt in real life
         role: "student",
       });
+
       const userId = userInsertResult.insertId;
 
+      // 3) Re-fetch user by email (safer than trusting insertId type)
       const [user] = await db
         .select()
         .from(users)
@@ -1148,6 +1168,7 @@ export function createRouter() {
         return res.status(500).json({ error: "user_creation_failed" });
       }
 
+      // 4) Create student profile
       const studentInsertResult = await db.insert(students).values({
         userId: user.id,
         centerId: center.id,
@@ -1156,17 +1177,25 @@ export function createRouter() {
       });
 
       const studentId = studentInsertResult.insertId;
+
       const [student] = await db
         .select()
         .from(students)
         .where(eq(students.id, studentId));
 
-      res.status(201).json({ user, student });
+      if (!student) {
+        return res
+          .status(500)
+          .json({ error: "student_creation_failed", userId: user.id });
+      }
+
+      return res.status(201).json({ user, student });
     } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "admin_add_student_failed" });
+      console.error("admin_add_student_failed:", err);
+      return res.status(500).json({ error: "admin_add_student_failed" });
     }
   });
+
 
     /**
    * DELETE /admin/students/:studentId

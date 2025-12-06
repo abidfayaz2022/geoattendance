@@ -10,22 +10,34 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs";
-import { GraduationCap, School, Lock, User } from "lucide-react";
+import { School, Lock, User, GraduationCap } from "lucide-react";
 import { motion } from "framer-motion";
+import { Redirect } from "wouter";
 
-export default function LoginPage() {
-  const { login, authError } = useAuth(); // authError is optional if you wired it
+/**
+ * LoginPage
+ * - mode = "student" (default) or "admin"
+ * - "/"  -> <LoginPage mode="student" />
+ * - "/admin" -> <LoginPage mode="admin" /> (when not logged in)
+ */
+export default function LoginPage({ mode = "student" }) {
+  const { login, authError, user } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [localError, setLocalError] = useState("");
-  const [activeTab, setActiveTab] = useState("student"); // "student" | "admin"
   const [submitting, setSubmitting] = useState(false);
+
+  const isStudent = mode === "student";
+
+  // If already logged in, send them to their dashboard
+  if (user) {
+    if (user.role === "admin") {
+      return <Redirect to="/admin" />;
+    }
+    if (user.role === "student") {
+      return <Redirect to="/student" />;
+    }
+  }
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -44,10 +56,8 @@ export default function LoginPage() {
     try {
       setSubmitting(true);
 
-      // Recommended: login(email, password, role)
-      const success = await login(email, password, activeTab);
-      // If your login only accepts (email, password), just do:
-      // const success = await login(email, password);
+      // pass role to login: "student" or "admin"
+      const success = await login(email, password, isStudent ? "student" : "admin");
 
       if (!success) {
         setLocalError("Invalid email or password");
@@ -90,48 +100,26 @@ export default function LoginPage() {
 
         <Card className="border-none shadow-xl bg-white/80 dark:bg-slate-900/80 backdrop-blur-lg">
           <CardHeader>
-            <CardTitle>Welcome Back</CardTitle>
-            <CardDescription>Sign in to your account to continue</CardDescription>
+            <CardTitle>
+              {isStudent ? "Student / Parent Login" : "Administrator Login"}
+            </CardTitle>
+            <CardDescription>
+              {isStudent
+                ? "Sign in to mark your attendance and view records."
+                : "Sign in to access admin controls and reports."}
+            </CardDescription>
           </CardHeader>
           <CardContent>
-            <Tabs
-              defaultValue="student"
-              value={activeTab}
-              onValueChange={setActiveTab}
-              className="w-full"
-            >
-              <TabsList className="grid w-full grid-cols-2 mb-6">
-                <TabsTrigger value="student">Student/Parent</TabsTrigger>
-                <TabsTrigger value="admin">Administrator</TabsTrigger>
-              </TabsList>
-
-              {/* We only need a single form; role is taken from activeTab */}
-              <TabsContent value="student">
-                <LoginFormFields
-                  activeTab={activeTab}
-                  email={email}
-                  setEmail={setEmail}
-                  password={password}
-                  setPassword={setPassword}
-                  error={combinedError}
-                  submitting={submitting}
-                  onSubmit={handleLogin}
-                />
-              </TabsContent>
-
-              <TabsContent value="admin">
-                <LoginFormFields
-                  activeTab={activeTab}
-                  email={email}
-                  setEmail={setEmail}
-                  password={password}
-                  setPassword={setPassword}
-                  error={combinedError}
-                  submitting={submitting}
-                  onSubmit={handleLogin}
-                />
-              </TabsContent>
-            </Tabs>
+            <LoginFormFields
+              mode={mode}
+              email={email}
+              setEmail={setEmail}
+              password={password}
+              setPassword={setPassword}
+              error={combinedError}
+              submitting={submitting}
+              onSubmit={handleLogin}
+            />
           </CardContent>
         </Card>
       </motion.div>
@@ -139,9 +127,8 @@ export default function LoginPage() {
   );
 }
 
-// Reusable form fields so both tabs show same form, just different CTA text / placeholder
 function LoginFormFields({
-  activeTab,
+  mode,
   email,
   setEmail,
   password,
@@ -150,29 +137,33 @@ function LoginFormFields({
   submitting,
   onSubmit,
 }) {
+  const isStudent = mode === "student";
+
   return (
     <form onSubmit={onSubmit} className="space-y-4">
       <div className="space-y-2">
-        <Label htmlFor={`email-${activeTab}`}>Email</Label>
+        <Label htmlFor={`email-${mode}`}>Email</Label>
         <div className="relative">
           <User className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
           <Input
-            id={`email-${activeTab}`}
-            placeholder={activeTab === "student" ? "e.g., john" : "e.g., admin"}
+            id={`email-${mode}`}
+            placeholder={
+              isStudent ? "e.g., student@example.com" : "e.g., admin@example.com"
+            }
             className="pl-9 bg-white dark:bg-slate-950/50"
             value={email}
-            onChange={(e) => setEmail (e.target.value)}
+            onChange={(e) => setEmail(e.target.value)}
             autoComplete="username"
           />
         </div>
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor={`password-${activeTab}`}>Password</Label>
+        <Label htmlFor={`password-${mode}`}>Password</Label>
         <div className="relative">
           <Lock className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
           <Input
-            id={`password-${activeTab}`}
+            id={`password-${mode}`}
             type="password"
             placeholder="••••••••"
             className="pl-9 bg-white dark:bg-slate-950/50"
@@ -181,7 +172,7 @@ function LoginFormFields({
             autoComplete="current-password"
           />
         </div>
-      </div >
+      </div>
 
       {error && (
         <p className="text-sm text-red-500 font-medium animate-in fade-in slide-in-from-left-1">
@@ -194,7 +185,7 @@ function LoginFormFields({
         className="w-full h-11 text-base font-medium shadow-lg shadow-primary/20 hover:shadow-primary/30 transition-all"
         disabled={submitting}
       >
-        {activeTab === "student" ? (
+        {isStudent ? (
           <>
             <GraduationCap className="mr-2 h-4 w-4" />
             {submitting ? "Logging in..." : "Student Login"}
@@ -206,8 +197,6 @@ function LoginFormFields({
           </>
         )}
       </Button>
-
-      
     </form>
   );
 }
