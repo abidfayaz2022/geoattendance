@@ -1,3 +1,4 @@
+// src/lib/auth.js
 import { createContext, useContext, useState, useEffect } from "react";
 import { useLocation } from "wouter";
 
@@ -17,9 +18,16 @@ export function AuthProvider({ children }) {
   // Restore session on load
   useEffect(() => {
     try {
-      const storedUser = localStorage.getItem("eduTrack_user");
-      if (storedUser) {
-        setUser(JSON.parse(storedUser));
+      // Backward-compatible: try eduTrack_user first, then authUser
+      const storedEduTrack = localStorage.getItem("eduTrack_user");
+      const storedAuthUser = localStorage.getItem("authUser");
+
+      const raw = storedEduTrack || storedAuthUser;
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") {
+          setUser(parsed);
+        }
       }
     } catch (err) {
       console.error("Failed to restore auth session:", err);
@@ -89,7 +97,12 @@ export function AuthProvider({ children }) {
       setUser(loggedInUser);
 
       try {
-        localStorage.setItem("eduTrack_user", JSON.stringify(loggedInUser));
+        // Persist under both keys so:
+        // - Your existing code keeps using "eduTrack_user"
+        // - The API client can read from "authUser" to send x-user-id / x-user-password
+        const serialized = JSON.stringify(loggedInUser);
+        localStorage.setItem("eduTrack_user", serialized);
+        localStorage.setItem("authUser", serialized);
       } catch (err) {
         console.warn("Failed to persist user in localStorage:", err);
       }
@@ -115,6 +128,7 @@ export function AuthProvider({ children }) {
     setAuthError(null);
     try {
       localStorage.removeItem("eduTrack_user");
+      localStorage.removeItem("authUser");
     } catch (err) {
       console.warn("Failed to clear user from localStorage:", err);
     }

@@ -1,9 +1,42 @@
-// src/lib/apiClient.js (or wherever you keep it)
+// src/lib/apiClient.js
 import { QueryClient } from "@tanstack/react-query";
 
 // Read API base URL from env; fallback to same-origin relative if not set
 // Example .env: VITE_API_BASE_URL="https://geoattendance-asi9.onrender.com/api"
 export const API_BASE_URL = "https://geoattendance-asi9.onrender.com/api" || "";
+
+/**
+ * Read auth info from localStorage and build headers.
+ * Adjust key/property names if your stored object is different.
+ *
+ * Expecting something like:
+ *   localStorage.setItem("authUser", JSON.stringify({
+ *     id,
+ *     role,
+ *     passwordHash,
+ *     ...
+ *   }))
+ */
+function getAuthHeaders() {
+  if (typeof window === "undefined") return {};
+
+  try {
+    const raw = window.localStorage.getItem("authUser");
+    if (!raw) return {};
+
+    const parsed = JSON.parse(raw);
+
+    if (!parsed?.id || !parsed?.passwordHash) return {};
+
+    return {
+      "x-user-id": String(parsed.id),
+      "x-user-password": parsed.passwordHash,
+    };
+  } catch (err) {
+    console.warn("Failed to read authUser from localStorage:", err);
+    return {};
+  }
+}
 
 /**
  * Build a full URL from a relative path or segments.
@@ -61,10 +94,14 @@ async function throwIfResNotOk(res) {
  */
 export async function apiRequest(method, url, data) {
   const finalUrl = buildUrl(url);
+  const authHeaders = getAuthHeaders();
 
   const res = await fetch(finalUrl, {
     method,
-    headers: data ? { "Content-Type": "application/json" } : {},
+    headers: {
+      ...(data ? { "Content-Type": "application/json" } : {}),
+      ...authHeaders,
+    },
     body: data ? JSON.stringify(data) : undefined,
     credentials: "include",
   });
@@ -88,9 +125,13 @@ export const getQueryFn =
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
     const url = buildUrl(queryKey);
+    const authHeaders = getAuthHeaders();
 
     const res = await fetch(url, {
       credentials: "include",
+      headers: {
+        ...authHeaders,
+      },
     });
 
     if (unauthorizedBehavior === "returnNull" && res.status === 401) {

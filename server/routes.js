@@ -17,6 +17,68 @@ const upload = multer({
   },
 });
 
+// ─────────────────────────
+// Simple auth middlewares
+// ─────────────────────────
+
+/**
+ * Reads credentials from headers:
+ *   x-user-id:       user.id  (number)
+ *   x-user-password: users.passwordHash  (what you already store)
+ *
+ * Verifies against DB, attaches req.user.
+ */
+async function simpleAuth(req, res, next) {
+  try {
+    const rawId = req.header("x-user-id");
+    const password = req.header("x-user-password");
+
+    if (!rawId || !password) {
+      return res.status(401).json({ error: "missing_auth_headers" });
+    }
+
+    const userId = Number(rawId);
+    if (!userId || Number.isNaN(userId)) {
+      return res.status(401).json({ error: "invalid_user_id" });
+    }
+
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.id, userId));
+
+    if (!user) {
+      return res.status(401).json({ error: "user_not_found" });
+    }
+
+    // You currently store plain password in passwordHash; compare directly.
+    // If you later hash it, you can change this to bcrypt.compare.
+    if (user.passwordHash !== password) {
+      return res.status(401).json({ error: "invalid_credentials" });
+    }
+
+    req.user = user;
+    return next();
+  } catch (err) {
+    console.error("simpleAuth failed:", err);
+    return res.status(500).json({ error: "auth_failed" });
+  }
+}
+
+/**
+ * Role guard: require that req.user.role === role.
+ */
+function requireRole(role) {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    if (req.user.role !== role) {
+      return res.status(403).json({ error: "forbidden" });
+    }
+    return next();
+  };
+}
 
 export function createRouter() {
   const router = express.Router();
@@ -25,18 +87,6 @@ export function createRouter() {
   // Auth (SUPER SIMPLE)
   // ─────────────────────────
 
-  /**
-   * POST /auth/register
-   * Body: {
-   *   name,
-   *   email,
-   *   password,
-   *   role?: "admin" | "student" (default "student"),
-   *   centerId?: number (required if role === "student"),
-   *   grade?: string,
-   *   rollNumber?: string
-   * }
-   */
   router.post("/auth/register", async (req, res) => {
     try {
       const {
@@ -61,11 +111,23 @@ export function createRouter() {
           .json({ error: "centerId_required_for_student" });
       }
 
-      // For MySQL, .returning() is not supported
+      const normalizedEmail = String(email).toLowerCase().trim();
+
+      // optional: prevent duplicate emails
+      const [existing] = await db
+        .select()
+        .from(users)
+        .where(eq(users.email, normalizedEmail));
+
+      if (existing) {
+        return res.status(409).json({ error: "user_already_exists" });
+      }
+
+      // For now you store plain password in passwordHash
       const userInsertResult = await db.insert(users).values({
         name,
-        email,
-        passwordHash: password, // TODO: hash password properly (bcrypt)
+        email: normalizedEmail,
+        passwordHash: password,
         role,
       });
 
@@ -82,7 +144,6 @@ export function createRouter() {
       let studentProfile = null;
 
       if (role === "student") {
-        // ensure center exists
         const [center] = await db
           .select()
           .from(centers)
@@ -119,6 +180,8 @@ export function createRouter() {
    * POST /auth/login
    * Body: { email, password }
    * NOTE: plain-text comparison (replace with bcrypt later).
+   * Returns user (including passwordHash), which frontend can store
+   * and resend via headers on each request.
    */
   router.post("/auth/login", async (req, res) => {
     try {
@@ -128,18 +191,22 @@ export function createRouter() {
         return res.status(400).json({ error: "missing_credentials" });
       }
 
+      const normalizedEmail = String(email).toLowerCase().trim();
+
       const [user] = await db
         .select()
         .from(users)
         .where(
-          and(eq(users.email, email), eq(users.passwordHash, password)) // TODO: bcrypt
+          and(
+            eq(users.email, normalizedEmail),
+            eq(users.passwordHash, password)
+          )
         );
 
       if (!user) {
         return res.status(401).json({ error: "invalid_credentials" });
       }
 
-      // For now return user directly; later you can add JWT / sessions
       res.json({ user });
     } catch (err) {
       console.error(err);
@@ -148,152 +215,126 @@ export function createRouter() {
   });
 
   // ─────────────────────────
-  // STUDENT APIs
+  // STUDENT APIs (protected)
   // ─────────────────────────
 
   /**
    * POST /student/attendance/check-in
+   *
    * Body: {
-   *   studentId: number, // actually userId from frontend
    *   lat: number,
    *   lng: number,
    *   accuracy?: number,
    *   deviceId?: string
    * }
    *
-   * Uses the student's center (from students.centerId) as the geofence:
-   * center.lat/lng + center.radiusMeters
-   * - Enforces 1 check-in per day (409)
-   * - Enforces radius on server side
+   * Uses req.user.id as the student userId.
    */
-  router.post("/student/attendance/check-in", async (req, res) => {
-    try {
-      const { studentId, lat, lng, accuracy, deviceId } = req.body || {};
+  router.post(
+    "/student/attendance/check-in",
+    simpleAuth,
+    requireRole("student"),
+    async (req, res) => {
+      try {
+        const { lat, lng, accuracy, deviceId } = req.body || {};
 
-      if (
-        !studentId ||
-        lat == null ||
-        lng == null ||
-        Number.isNaN(Number(lat)) ||
-        Number.isNaN(Number(lng))
-      ) {
-        return res.status(400).json({ error: "missing_check_in_data" });
-      }
+        if (
+          lat == null ||
+          lng == null ||
+          Number.isNaN(Number(lat)) ||
+          Number.isNaN(Number(lng))
+        ) {
+          return res.status(400).json({ error: "missing_check_in_data" });
+        }
 
-      const studentUserId = Number(studentId);
+        const studentUserId = Number(req.user.id);
 
-      // who is checking in? (student linked by userId)
-      const [student] = await db
-        .select()
-        .from(students)
-        .where(eq(students.userId, studentUserId));
+        // who is checking in? (student linked by userId)
+        const [student] = await db
+          .select()
+          .from(students)
+          .where(eq(students.userId, studentUserId));
 
-      if (!student) {
-        return res.status(404).json({ error: "student_not_found" });
-      }
+        if (!student) {
+          return res.status(404).json({ error: "student_not_found" });
+        }
 
-      // which center?
-      const [center] = await db
-        .select()
-        .from(centers)
-        .where(eq(centers.id, student.centerId));
+        // which center?
+        const [center] = await db
+          .select()
+          .from(centers)
+          .where(eq(centers.id, student.centerId));
 
-      if (!center) {
-        return res.status(404).json({ error: "center_not_found" });
-      }
+        if (!center) {
+          return res.status(404).json({ error: "center_not_found" });
+        }
 
-      if (
-        center.lat == null ||
-        center.lng == null ||
-        center.radiusMeters == null
-      ) {
-        return res
-          .status(400)
-          .json({ error: "center_geofence_not_configured" });
-      }
+        if (
+          center.lat == null ||
+          center.lng == null ||
+          center.radiusMeters == null
+        ) {
+          return res
+            .status(400)
+            .json({ error: "center_geofence_not_configured" });
+        }
 
-      // ---- Prevent multiple check-ins per day (matches 409 handling in UI)
-      const now = new Date();
-      const todayStart = new Date(
-        Date.UTC(
-          now.getUTCFullYear(),
-          now.getUTCMonth(),
-          now.getUTCDate(),
-          0,
-          0,
-          0
-        )
-      );
-      const tomorrowStart = new Date(todayStart);
-      tomorrowStart.setUTCDate(todayStart.getUTCDate() + 1);
-
-      const [existingToday] = await db
-        .select({ id: attendanceRecords.id })
-        .from(attendanceRecords)
-        .where(
-          and(
-            eq(attendanceRecords.studentId, student.id),
-            gte(attendanceRecords.checkInAt, todayStart),
-            lt(attendanceRecords.checkInAt, tomorrowStart)
+        // ---- Prevent multiple check-ins per day
+        const now = new Date();
+        const todayStart = new Date(
+          Date.UTC(
+            now.getUTCFullYear(),
+            now.getUTCMonth(),
+            now.getUTCDate(),
+            0,
+            0,
+            0
           )
         );
+        const tomorrowStart = new Date(todayStart);
+        tomorrowStart.setUTCDate(todayStart.getUTCDate() + 1);
 
-      if (existingToday) {
-        return res.status(409).json({
-          error: "already_checked_in",
-          message: "You have already marked attendance for today.",
-        });
-      }
-      // ---- END: duplicate check
+        const [existingToday] = await db
+          .select({ id: attendanceRecords.id })
+          .from(attendanceRecords)
+          .where(
+            and(
+              eq(attendanceRecords.studentId, student.id),
+              gte(attendanceRecords.checkInAt, todayStart),
+              lt(attendanceRecords.checkInAt, tomorrowStart)
+            )
+          );
 
-      // Check distance from center
-      const distanceMeters = haversine(
-        Number(center.lat),
-        Number(center.lng),
-        Number(lat),
-        Number(lng)
-      );
+        if (existingToday) {
+          return res.status(409).json({
+            error: "already_checked_in",
+            message: "You have already marked attendance for today.",
+          });
+        }
 
-      const withinRadius = distanceMeters <= Number(center.radiusMeters);
+        // Check distance from center
+        const distanceMeters = haversine(
+          Number(center.lat),
+          Number(center.lng),
+          Number(lat),
+          Number(lng)
+        );
 
-      if (!withinRadius) {
-        return res.status(403).json({
-          error: "outside_geofence",
-          distanceMeters,
-          radiusMeters: center.radiusMeters,
-          allowed: false,
-        });
-      }
+        const withinRadius = distanceMeters <= Number(center.radiusMeters);
 
-      const ipAddress = req.ip || req.headers["x-forwarded-for"] || null;
-      const userAgent = req.headers["user-agent"] || null;
+        if (!withinRadius) {
+          return res.status(403).json({
+            error: "outside_geofence",
+            distanceMeters,
+            radiusMeters: center.radiusMeters,
+            allowed: false,
+          });
+        }
 
-      // MySQL: no returning(); use insertId
-      const insertResult = await db.insert(attendanceRecords).values({
-        studentId: student.id,
-        centerId: center.id,
-        checkInAt: now,
-        status: "present",
-        checkInLat: Number(lat),
-        checkInLng: Number(lng),
-        checkInAccuracy: accuracy != null ? Number(accuracy) : null,
-        distanceFromCenterMeters: distanceMeters,
-        deviceId: deviceId || null,
-        ipAddress,
-        userAgent,
-      });
+        const ipAddress = req.ip || req.headers["x-forwarded-for"] || null;
+        const userAgent = req.headers["user-agent"] || null;
 
-      const newId = insertResult.insertId;
-
-      let [record] = await db
-        .select()
-        .from(attendanceRecords)
-        .where(eq(attendanceRecords.id, newId));
-
-      if (!record) {
-        // Fallback if select fails for some reason
-        record = {
-          id: newId,
+        const insertResult = await db.insert(attendanceRecords).values({
           studentId: student.id,
           centerId: center.id,
           checkInAt: now,
@@ -305,1015 +346,954 @@ export function createRouter() {
           deviceId: deviceId || null,
           ipAddress,
           userAgent,
-        };
-      }
-
-      res.json({
-        ok: true,
-        record,
-        distanceMeters,
-      });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "student_check_in_failed" });
-    }
-  });
-
-
-    /**
-   * POST /student/attendance/check-out
-   * Body: {
-   *   studentId: number, // userId from frontend
-   *   lat: number,
-   *   lng: number,
-   *   accuracy?: number,
-   *   deviceId?: string
-   * }
-   *
-   * - Finds today's "open" attendance record (no checkOutAt yet)
-   * - Enforces geofence again on checkout
-   */
-  router.post("/student/attendance/check-out", async (req, res) => {
-    try {
-      const { studentId, lat, lng, accuracy, deviceId } = req.body || {};
-
-      if (
-        !studentId ||
-        lat == null ||
-        lng == null ||
-        Number.isNaN(Number(lat)) ||
-        Number.isNaN(Number(lng))
-      ) {
-        return res.status(400).json({ error: "missing_checkout_data" });
-      }
-
-      const studentUserId = Number(studentId);
-
-      // resolve student
-      const [student] = await db
-        .select()
-        .from(students)
-        .where(eq(students.userId, studentUserId));
-
-      if (!student) {
-        return res.status(404).json({ error: "student_not_found" });
-      }
-
-      const [center] = await db
-        .select()
-        .from(centers)
-        .where(eq(centers.id, student.centerId));
-
-      if (!center) {
-        return res.status(404).json({ error: "center_not_found" });
-      }
-
-      if (
-        center.lat == null ||
-        center.lng == null ||
-        center.radiusMeters == null
-      ) {
-        return res
-          .status(400)
-          .json({ error: "center_geofence_not_configured" });
-      }
-
-      const now = new Date();
-      const todayStart = new Date(
-        Date.UTC(
-          now.getUTCFullYear(),
-          now.getUTCMonth(),
-          now.getUTCDate(),
-          0,
-          0,
-          0
-        )
-      );
-      const tomorrowStart = new Date(todayStart);
-      tomorrowStart.setUTCDate(todayStart.getUTCDate() + 1);
-
-      // find today's attendance record with no checkout yet
-      const [openRecord] = await db
-        .select()
-        .from(attendanceRecords)
-        .where(
-          and(
-            eq(attendanceRecords.studentId, student.id),
-            gte(attendanceRecords.checkInAt, todayStart),
-            lt(attendanceRecords.checkInAt, tomorrowStart),
-            sql`${attendanceRecords.checkOutAt} IS NULL`
-          )
-        )
-        .orderBy(desc(attendanceRecords.checkInAt));
-
-      if (!openRecord) {
-        return res.status(409).json({
-          error: "no_open_session",
-          message: "No open attendance record found for today.",
         });
-      }
 
-      const distanceMeters = haversine(
-        Number(center.lat),
-        Number(center.lng),
-        Number(lat),
-        Number(lng)
-      );
-      const withinRadius = distanceMeters <= Number(center.radiusMeters);
+        const newId = insertResult.insertId;
 
-      if (!withinRadius) {
-        return res.status(403).json({
-          error: "outside_geofence",
+        let [record] = await db
+          .select()
+          .from(attendanceRecords)
+          .where(eq(attendanceRecords.id, newId));
+
+        if (!record) {
+          record = {
+            id: newId,
+            studentId: student.id,
+            centerId: center.id,
+            checkInAt: now,
+            status: "present",
+            checkInLat: Number(lat),
+            checkInLng: Number(lng),
+            checkInAccuracy: accuracy != null ? Number(accuracy) : null,
+            distanceFromCenterMeters: distanceMeters,
+            deviceId: deviceId || null,
+            ipAddress,
+            userAgent,
+          };
+        }
+
+        res.json({
+          ok: true,
+          record,
           distanceMeters,
-          radiusMeters: center.radiusMeters,
-          allowed: false,
         });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "student_check_in_failed" });
       }
-
-      const ipAddress = req.ip || req.headers["x-forwarded-for"] || null;
-      const userAgent = req.headers["user-agent"] || null;
-
-      await db
-        .update(attendanceRecords)
-        .set({
-          checkOutAt: now,
-          checkOutLat: Number(lat),
-          checkOutLng: Number(lng),
-          checkOutAccuracy: accuracy != null ? Number(accuracy) : null,
-          distanceFromCenterCheckoutMeters: distanceMeters,
-          deviceId: deviceId || openRecord.deviceId || null,
-          ipAddress: ipAddress || openRecord.ipAddress || null,
-          userAgent: userAgent || openRecord.userAgent || null,
-        })
-        .where(eq(attendanceRecords.id, openRecord.id));
-
-      const [updated] = await db
-        .select()
-        .from(attendanceRecords)
-        .where(eq(attendanceRecords.id, openRecord.id));
-
-      res.json({
-        ok: true,
-        record: updated || null,
-        distanceMeters,
-      });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "student_check_out_failed" });
     }
-  });
-
+  );
 
   /**
-   * GET /student/geofence?studentId=123
-   *
-   * Returns the geofence for the student's center:
-   * {
-   *   centerId,
-   *   centerName,
-   *   centerLat,
-   *   centerLng,
-   *   radiusMeters
-   * }
-   *
-   * NOTE: studentId is user.id from frontend
+   * POST /student/attendance/check-out
    */
-  router.get("/student/geofence", async (req, res) => {
-    try {
-      const studentUserId = Number(req.query.studentId);
+  router.post(
+    "/student/attendance/check-out",
+    simpleAuth,
+    requireRole("student"),
+    async (req, res) => {
+      try {
+        const { lat, lng, accuracy, deviceId } = req.body || {};
 
-      if (!studentUserId) {
-        return res.status(400).json({ error: "studentId_required" });
+        if (
+          lat == null ||
+          lng == null ||
+          Number.isNaN(Number(lat)) ||
+          Number.isNaN(Number(lng))
+        ) {
+          return res.status(400).json({ error: "missing_checkout_data" });
+        }
+
+        const studentUserId = Number(req.user.id);
+
+        // resolve student
+        const [student] = await db
+          .select()
+          .from(students)
+          .where(eq(students.userId, studentUserId));
+
+        if (!student) {
+          return res.status(404).json({ error: "student_not_found" });
+        }
+
+        const [center] = await db
+          .select()
+          .from(centers)
+          .where(eq(centers.id, student.centerId));
+
+        if (!center) {
+          return res.status(404).json({ error: "center_not_found" });
+        }
+
+        if (
+          center.lat == null ||
+          center.lng == null ||
+          center.radiusMeters == null
+        ) {
+          return res
+            .status(400)
+            .json({ error: "center_geofence_not_configured" });
+        }
+
+        const now = new Date();
+        const todayStart = new Date(
+          Date.UTC(
+            now.getUTCFullYear(),
+            now.getUTCMonth(),
+            now.getUTCDate(),
+            0,
+            0,
+            0
+          )
+        );
+        const tomorrowStart = new Date(todayStart);
+        tomorrowStart.setUTCDate(todayStart.getUTCDate() + 1);
+
+        const [openRecord] = await db
+          .select()
+          .from(attendanceRecords)
+          .where(
+            and(
+              eq(attendanceRecords.studentId, student.id),
+              gte(attendanceRecords.checkInAt, todayStart),
+              lt(attendanceRecords.checkInAt, tomorrowStart),
+              sql`${attendanceRecords.checkOutAt} IS NULL`
+            )
+          )
+          .orderBy(desc(attendanceRecords.checkInAt));
+
+        if (!openRecord) {
+          return res.status(409).json({
+            error: "no_open_session",
+            message: "No open attendance record found for today.",
+          });
+        }
+
+        const distanceMeters = haversine(
+          Number(center.lat),
+          Number(center.lng),
+          Number(lat),
+          Number(lng)
+        );
+        const withinRadius = distanceMeters <= Number(center.radiusMeters);
+
+        if (!withinRadius) {
+          return res.status(403).json({
+            error: "outside_geofence",
+            distanceMeters,
+            radiusMeters: center.radiusMeters,
+            allowed: false,
+          });
+        }
+
+        const ipAddress = req.ip || req.headers["x-forwarded-for"] || null;
+        const userAgent = req.headers["user-agent"] || null;
+
+        await db
+          .update(attendanceRecords)
+          .set({
+            checkOutAt: now,
+            checkOutLat: Number(lat),
+            checkOutLng: Number(lng),
+            checkOutAccuracy: accuracy != null ? Number(accuracy) : null,
+            distanceFromCenterCheckoutMeters: distanceMeters,
+            deviceId: deviceId || openRecord.deviceId || null,
+            ipAddress: ipAddress || openRecord.ipAddress || null,
+            userAgent: userAgent || openRecord.userAgent || null,
+          })
+          .where(eq(attendanceRecords.id, openRecord.id));
+
+        const [updated] = await db
+          .select()
+          .from(attendanceRecords)
+          .where(eq(attendanceRecords.id, openRecord.id));
+
+        res.json({
+          ok: true,
+          record: updated || null,
+          distanceMeters,
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "student_check_out_failed" });
       }
-
-      // Find the student by userId
-      const [student] = await db
-        .select()
-        .from(students)
-        .where(eq(students.userId, studentUserId));
-
-      if (!student) {
-        return res.status(404).json({ error: "student_not_found" });
-      }
-
-      // Get their center
-      const [center] = await db
-        .select()
-        .from(centers)
-        .where(eq(centers.id, student.centerId));
-
-      if (!center) {
-        return res.status(404).json({ error: "center_not_found" });
-      }
-
-      if (
-        center.lat == null ||
-        center.lng == null ||
-        center.radiusMeters == null
-      ) {
-        return res
-          .status(400)
-          .json({ error: "center_geofence_not_configured" });
-      }
-
-      res.json({
-        centerId: center.id,
-        centerName: center.name,
-        centerLat: Number(center.lat),
-        centerLng: Number(center.lng),
-        radiusMeters: Number(center.radiusMeters),
-      });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "student_geofence_failed" });
     }
-  });
+  );
 
   /**
-   * GET /student/attendance-history?studentId=123
-   * Returns recent attendance records for one student.
-   *
-   * NOTE: studentId is user.id from frontend
+   * GET /student/geofence
+   * Uses req.user.id, no query param needed.
    */
-  router.get("/student/attendance-history", async (req, res) => {
-    try {
-      const studentUserId = Number(req.query.studentId);
-      if (!studentUserId) {
-        return res.status(400).json({ error: "studentId_required" });
+  router.get(
+    "/student/geofence",
+    simpleAuth,
+    requireRole("student"),
+    async (req, res) => {
+      try {
+        const studentUserId = Number(req.user.id);
+
+        const [student] = await db
+          .select()
+          .from(students)
+          .where(eq(students.userId, studentUserId));
+
+        if (!student) {
+          return res.status(404).json({ error: "student_not_found" });
+        }
+
+        const [center] = await db
+          .select()
+          .from(centers)
+          .where(eq(centers.id, student.centerId));
+
+        if (!center) {
+          return res.status(404).json({ error: "center_not_found" });
+        }
+
+        if (
+          center.lat == null ||
+          center.lng == null ||
+          center.radiusMeters == null
+        ) {
+          return res
+            .status(400)
+            .json({ error: "center_geofence_not_configured" });
+        }
+
+        res.json({
+          centerId: center.id,
+          centerName: center.name,
+          centerLat: Number(center.lat),
+          centerLng: Number(center.lng),
+          radiusMeters: Number(center.radiusMeters),
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "student_geofence_failed" });
       }
-
-      // Resolve the student by userId
-      const [student] = await db
-        .select()
-        .from(students)
-        .where(eq(students.userId, studentUserId));
-
-      if (!student) {
-        return res.status(404).json({ error: "student_not_found" });
-      }
-
-      const rows = await db
-        .select({
-          id: attendanceRecords.id,
-          date: attendanceRecords.checkInAt,
-          status: attendanceRecords.status,
-          checkInLat: attendanceRecords.checkInLat,
-          checkInLng: attendanceRecords.checkInLng,
-        })
-        .from(attendanceRecords)
-        .where(eq(attendanceRecords.studentId, student.id))
-        .orderBy(desc(attendanceRecords.checkInAt))
-        .limit(50);
-
-      const mapped = rows.map((r) => ({
-        id: r.id,
-        date: r.date,
-        time: r.date ? r.date.toISOString() : null,
-        status: r.status || "present",
-        location:
-          r.checkInLat != null && r.checkInLng != null
-            ? { lat: Number(r.checkInLat), lng: Number(r.checkInLng) }
-            : null,
-      }));
-
-      res.json(mapped);
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "student_history_failed" });
     }
-  });
-
-  // ─────────────────────────
-  // ADMIN APIs
-  // ─────────────────────────
+  );
 
   /**
-   * GET /admin/attendance-report
-   *
-   * Query params:
-   *  - centerId?: number
-   *  - grade?: string
-   *  - status?: string ("present", "late", etc.)
-   *  - dateFrom?: YYYY-MM-DD
-   *  - dateTo?: YYYY-MM-DD
-   *  - page?: number (default 1)
-   *  - pageSize?: number (default 50, max 500)
-   *
-   * Returns:
-   * {
-   *   meta: { page, pageSize, total, totalPages },
-   *   rows: [ ... ]
-   * }
+   * GET /student/attendance-history
    */
-  router.get("/admin/attendance-report", async (req, res) => {
-    try {
-      const centerId = req.query.centerId ? Number(req.query.centerId) : null;
-      const grade = req.query.grade ? String(req.query.grade) : null;
-      const status = req.query.status ? String(req.query.status) : null;
-      const dateFromStr = req.query.dateFrom
-        ? String(req.query.dateFrom)
-        : null;
-      const dateToStr = req.query.dateTo ? String(req.query.dateTo) : null;
+  router.get(
+    "/student/attendance-history",
+    simpleAuth,
+    requireRole("student"),
+    async (req, res) => {
+      try {
+        const studentUserId = Number(req.user.id);
 
-      let page = parseInt(String(req.query.page || "1"), 10);
-      let pageSize = parseInt(String(req.query.pageSize || "50"), 10);
+        const [student] = await db
+          .select()
+          .from(students)
+          .where(eq(students.userId, studentUserId));
 
-      if (Number.isNaN(page) || page < 1) page = 1;
-      if (Number.isNaN(pageSize) || pageSize < 1) pageSize = 50;
-      if (pageSize > 500) pageSize = 500;
+        if (!student) {
+          return res.status(404).json({ error: "student_not_found" });
+        }
 
-      const now = new Date();
-      let fromDate = dateFromStr ? new Date(dateFromStr) : null;
-      let toDate = dateToStr ? new Date(dateToStr) : null;
+        const rows = await db
+          .select({
+            id: attendanceRecords.id,
+            date: attendanceRecords.checkInAt,
+            status: attendanceRecords.status,
+            checkInLat: attendanceRecords.checkInLat,
+            checkInLng: attendanceRecords.checkInLng,
+          })
+          .from(attendanceRecords)
+          .where(eq(attendanceRecords.studentId, student.id))
+          .orderBy(desc(attendanceRecords.checkInAt))
+          .limit(50);
 
-      if (fromDate && Number.isNaN(fromDate.getTime())) {
-        return res.status(400).json({ error: "invalid_dateFrom" });
+        const mapped = rows.map((r) => ({
+          id: r.id,
+          date: r.date,
+          time: r.date ? r.date.toISOString() : null,
+          status: r.status || "present",
+          location:
+            r.checkInLat != null && r.checkInLng != null
+              ? { lat: Number(r.checkInLat), lng: Number(r.checkInLng) }
+              : null,
+        }));
+
+        res.json(mapped);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "student_history_failed" });
       }
-      if (toDate && Number.isNaN(toDate.getTime())) {
-        return res.status(400).json({ error: "invalid_dateTo" });
-      }
-
-      // default: last 30 days
-      if (!fromDate && !toDate) {
-        toDate = now;
-        fromDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-      } else if (fromDate && !toDate) {
-        toDate = now;
-      } else if (!fromDate && toDate) {
-        fromDate = new Date(toDate.getTime() - 30 * 24 * 60 * 60 * 1000);
-      }
-
-      // Normalize to UTC day bounds [fromStart, toEnd)
-      const fromStart = new Date(
-        Date.UTC(
-          fromDate.getUTCFullYear(),
-          fromDate.getUTCMonth(),
-          fromDate.getUTCDate(),
-          0,
-          0,
-          0
-        )
-      );
-      const toEnd = new Date(
-        Date.UTC(
-          toDate.getUTCFullYear(),
-          toDate.getUTCMonth(),
-          toDate.getUTCDate() + 1,
-          0,
-          0,
-          0
-        )
-      );
-
-      const conditions = [
-        gte(attendanceRecords.checkInAt, fromStart),
-        lt(attendanceRecords.checkInAt, toEnd),
-      ];
-
-      if (centerId) {
-        conditions.push(eq(attendanceRecords.centerId, centerId));
-      }
-      if (grade) {
-        conditions.push(eq(students.grade, grade));
-      }
-      if (status) {
-        conditions.push(eq(attendanceRecords.status, status));
-      }
-
-      const whereExpr = and(...conditions);
-      const offset = (page - 1) * pageSize;
-
-      // count total rows
-      const [countRow] = await db
-        .select({ count: sql`count(*)` })
-        .from(attendanceRecords)
-        .leftJoin(students, eq(attendanceRecords.studentId, students.id))
-        .leftJoin(users, eq(students.userId, users.id))
-        .leftJoin(centers, eq(attendanceRecords.centerId, centers.id))
-        .where(whereExpr);
-
-      const total = Number(countRow?.count || 0);
-      const totalPages = total > 0 ? Math.ceil(total / pageSize) : 0;
-
-      const rows = await db
-        .select({
-          id: attendanceRecords.id,
-          checkInAt: attendanceRecords.checkInAt,
-          checkOutAt: attendanceRecords.checkOutAt,
-          status: attendanceRecords.status,
-          checkInLat: attendanceRecords.checkInLat,
-          checkInLng: attendanceRecords.checkInLng,
-          checkOutLat: attendanceRecords.checkOutLat,
-          checkOutLng: attendanceRecords.checkOutLng,
-          distanceFromCenterMeters: attendanceRecords.distanceFromCenterMeters,
-          distanceFromCenterCheckoutMeters:
-            attendanceRecords.distanceFromCenterCheckoutMeters,
-          studentId: students.id,
-          studentGrade: students.grade,
-          rollNumber: students.rollNumber,
-          userName: users.name,
-          userEmail: users.email,
-          centerId: centers.id,
-          centerName: centers.name,
-          centerCode: centers.code,
-        })
-        .from(attendanceRecords)
-        .leftJoin(students, eq(attendanceRecords.studentId, students.id))
-        .leftJoin(users, eq(students.userId, users.id))
-        .leftJoin(centers, eq(attendanceRecords.centerId, centers.id))
-        .where(whereExpr)
-        .orderBy(desc(attendanceRecords.checkInAt))
-        .limit(pageSize)
-        .offset(offset);
-
-      const mapped = rows.map((r) => ({
-        id: r.id,
-        studentId: r.studentId,
-        studentName: r.userName || "Unknown",
-        studentEmail: r.userEmail || null,
-        grade: r.studentGrade || null,
-        rollNumber: r.rollNumber || null,
-        centerId: r.centerId,
-        centerName: r.centerName,
-        centerCode: r.centerCode,
-        checkInAt: r.checkInAt,
-        checkOutAt: r.checkOutAt,
-        status: r.status || "present",
-        checkInLocation:
-          r.checkInLat != null && r.checkInLng != null
-            ? { lat: Number(r.checkInLat), lng: Number(r.checkInLng) }
-            : null,
-        checkOutLocation:
-          r.checkOutLat != null && r.checkOutLng != null
-            ? { lat: Number(r.checkOutLat), lng: Number(r.checkOutLng) }
-            : null,
-        distanceFromCenterMeters:
-          r.distanceFromCenterMeters != null
-            ? Number(r.distanceFromCenterMeters)
-            : null,
-        distanceFromCenterCheckoutMeters:
-          r.distanceFromCenterCheckoutMeters != null
-            ? Number(r.distanceFromCenterCheckoutMeters)
-            : null,
-      }));
-
-      res.json({
-        meta: {
-          page,
-          pageSize,
-          total,
-          totalPages,
-          dateFrom: fromStart,
-          dateTo: toEnd,
-        },
-        rows: mapped,
-      });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "admin_attendance_report_failed" });
     }
-  });
+  );
 
   /**
-   * GET /admin/students/export?centerId=1
-   *
-   * Exports students + their hashed password as CSV.
+   * GET /student/attendance/report?from=YYYY-MM-DD&to=YYYY-MM-DD&format=csv|json
    */
-  router.get("/admin/students/export", async (req, res) => {
-    try {
-      const centerId = req.query.centerId ? Number(req.query.centerId) : null;
+  router.get(
+    "/student/attendance/report",
+    simpleAuth,
+    requireRole("student"),
+    async (req, res) => {
+      try {
+        const studentUserId = Number(req.user.id);
+        const fromStr = String(req.query.from || "");
+        const toStr = String(req.query.to || "");
+        const format = (req.query.format || "csv").toString().toLowerCase();
 
-      const conditions = [];
-      if (centerId) {
-        conditions.push(eq(students.centerId, centerId));
-      }
-      const whereExpr = conditions.length ? and(...conditions) : undefined;
+        if (!fromStr || !toStr) {
+          return res.status(400).json({ error: "from_and_to_required" });
+        }
 
-      let query = db
-        .select({
-          studentId: students.id,
-          userId: users.id,
-          name: users.name,
-          email: users.email,
-          passwordHash: users.passwordHash,
-          grade: students.grade,
-          rollNumber: students.rollNumber,
-          centerName: centers.name,
-          centerCode: centers.code,
-        })
-        .from(students)
-        .leftJoin(users, eq(students.userId, users.id))
-        .leftJoin(centers, eq(students.centerId, centers.id));
+        const fromDateRaw = new Date(fromStr);
+        const toDateRaw = new Date(toStr);
 
-      if (whereExpr) {
-        query = query.where(whereExpr);
-      }
+        if (
+          Number.isNaN(fromDateRaw.getTime()) ||
+          Number.isNaN(toDateRaw.getTime())
+        ) {
+          return res.status(400).json({ error: "invalid_date_range" });
+        }
 
-      const rows = await query;
-
-      res.setHeader("Content-Type", "text/csv; charset=utf-8");
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="students_${centerId || "all"}.csv"`
-      );
-
-      const header = [
-        "student_id",
-        "user_id",
-        "name",
-        "email",
-        "password_hash",
-        "grade",
-        "roll_number",
-        "center_name",
-        "center_code",
-      ];
-      const lines = [header.join(",")];
-
-      for (const r of rows) {
-        const row = [
-          r.studentId,
-          r.userId,
-          r.name || "",
-          r.email || "",
-          r.passwordHash || "",
-          r.grade || "",
-          r.rollNumber || "",
-          r.centerName || "",
-          r.centerCode || "",
-        ];
-        lines.push(row.join(","));
-      }
-
-      res.send(lines.join("\n"));
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "admin_students_export_failed" });
-    }
-  });
-
-
-  /**
-   * GET /admin/stats
-   * Returns { totalStudents, presentToday, attendanceRate }
-   */
-  router.get("/admin/stats", async (_req, res) => {
-    try {
-      // total students
-      const [studentsCountRow] = await db
-        .select({ count: sql`count(*)` })
-        .from(students);
-
-      const totalStudents = Number(studentsCountRow?.count || 0);
-
-      const now = new Date();
-      const todayStart = new Date(
-        Date.UTC(
-          now.getUTCFullYear(),
-          now.getUTCMonth(),
-          now.getUTCDate(),
-          0,
-          0,
-          0
-        )
-      );
-      const tomorrowStart = new Date(todayStart);
-      tomorrowStart.setUTCDate(todayStart.getUTCDate() + 1);
-
-      const [presentRow] = await db
-        .select({ count: sql`count(*)` })
-        .from(attendanceRecords)
-        .where(
-          and(
-            eq(attendanceRecords.status, "present"),
-            gte(attendanceRecords.checkInAt, todayStart),
-            lt(attendanceRecords.checkInAt, tomorrowStart)
+        const fromStart = new Date(
+          Date.UTC(
+            fromDateRaw.getUTCFullYear(),
+            fromDateRaw.getUTCMonth(),
+            fromDateRaw.getUTCDate(),
+            0,
+            0,
+            0
+          )
+        );
+        const toEnd = new Date(
+          Date.UTC(
+            toDateRaw.getUTCFullYear(),
+            toDateRaw.getUTCMonth(),
+            toDateRaw.getUTCDate() + 1,
+            0,
+            0,
+            0
           )
         );
 
-      const presentToday = Number(presentRow?.count || 0);
-      const attendanceRate =
-        totalStudents > 0
-          ? Math.round((presentToday / totalStudents) * 100)
-          : 0;
+        const [student] = await db
+          .select()
+          .from(students)
+          .where(eq(students.userId, studentUserId));
 
-      res.json({
-        totalStudents,
-        presentToday,
-        attendanceRate,
-      });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "admin_stats_failed" });
-    }
-  });
+        if (!student) {
+          return res.status(404).json({ error: "student_not_found" });
+        }
 
-  /**
-   * GET /admin/attendance-records
-   * Returns flattened records for admin table.
-   *
-   * [
-   *   {
-   *     id,
-   *     userId,      // student.id
-   *     userName,    // users.name
-   *     userGrade,   // students.grade
-   *     date,
-   *     time,
-   *     status,
-   *     location: { lat, lng }
-   *   }
-   * ]
-   */
-  router.get("/admin/attendance-records", async (_req, res) => {
-    try {
-      const rows = await db
-        .select({
-          id: attendanceRecords.id,
-          date: attendanceRecords.checkInAt,
-          status: attendanceRecords.status,
-          checkInLat: attendanceRecords.checkInLat,
-          checkInLng: attendanceRecords.checkInLng,
-          studentId: students.id,
-          studentGrade: students.grade,
-          userName: users.name,
-        })
-        .from(attendanceRecords)
-        .leftJoin(students, eq(attendanceRecords.studentId, students.id))
-        .leftJoin(users, eq(students.userId, users.id))
-        .orderBy(desc(attendanceRecords.checkInAt))
-        .limit(200);
-
-      const mapped = rows.map((r) => ({
-        id: r.id,
-        userId: String(r.studentId ?? ""),
-        userName: r.userName || "Unknown",
-        userGrade: r.studentGrade || "N/A",
-        date: r.date,
-        time: r.date != null ? r.date.toISOString() : null,
-        status: r.status || "present",
-        location:
-          r.checkInLat != null && r.checkInLng != null
-            ? { lat: Number(r.checkInLat), lng: Number(r.checkInLng) }
-            : null,
-      }));
-
-      res.json(mapped);
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "admin_records_failed" });
-    }
-  });
-
-
-
-  /**
-   * GET /student/attendance-export?studentId=123&from=YYYY-MM-DD&to=YYYY-MM-DD&format=csv|json
-   *
-   * - studentId is users.id on frontend (like other student routes)
-   * - from/to are required and interpreted as dates in UTC day-bounds
-   * - default format is "csv"
-   */
-  router.get("/student/attendance/report", async (req, res) => {
-    try {
-      const studentUserId = Number(req.query.studentId);
-      const fromStr = String(req.query.from || "");
-      const toStr = String(req.query.to || "");
-      const format = (req.query.format || "csv").toString().toLowerCase();
-
-      if (!studentUserId) {
-        return res.status(400).json({ error: "studentId_required" });
-      }
-      if (!fromStr || !toStr) {
-        return res.status(400).json({ error: "from_and_to_required" });
-      }
-
-      const fromDateRaw = new Date(fromStr);
-      const toDateRaw = new Date(toStr);
-
-      if (Number.isNaN(fromDateRaw.getTime()) || Number.isNaN(toDateRaw.getTime())) {
-        return res.status(400).json({ error: "invalid_date_range" });
-      }
-
-      // Normalize to UTC day bounds [fromStart, toEnd)
-      const fromStart = new Date(
-        Date.UTC(
-          fromDateRaw.getUTCFullYear(),
-          fromDateRaw.getUTCMonth(),
-          fromDateRaw.getUTCDate(),
-          0,
-          0,
-          0
-        )
-      );
-      const toEnd = new Date(
-        Date.UTC(
-          toDateRaw.getUTCFullYear(),
-          toDateRaw.getUTCMonth(),
-          toDateRaw.getUTCDate() + 1,
-          0,
-          0,
-          0
-        )
-      );
-
-      // Resolve student by userId
-      const [student] = await db
-        .select()
-        .from(students)
-        .where(eq(students.userId, studentUserId));
-
-      if (!student) {
-        return res.status(404).json({ error: "student_not_found" });
-      }
-
-      const rows = await db
-        .select()
-        .from(attendanceRecords)
-        .where(
-          and(
-            eq(attendanceRecords.studentId, student.id),
-            gte(attendanceRecords.checkInAt, fromStart),
-            lt(attendanceRecords.checkInAt, toEnd)
+        const rows = await db
+          .select()
+          .from(attendanceRecords)
+          .where(
+            and(
+              eq(attendanceRecords.studentId, student.id),
+              gte(attendanceRecords.checkInAt, fromStart),
+              lt(attendanceRecords.checkInAt, toEnd)
+            )
           )
-        )
-        .orderBy(desc(attendanceRecords.checkInAt));
+          .orderBy(desc(attendanceRecords.checkInAt));
 
-      if (format === "json") {
+        if (format === "json") {
+          const mapped = rows.map((r) => ({
+            id: r.id,
+            checkInAt: r.checkInAt,
+            checkOutAt: r.checkOutAt,
+            status: r.status,
+            checkInLat: r.checkInLat,
+            checkInLng: r.checkInLng,
+            checkOutLat: r.checkOutLat,
+            checkOutLng: r.checkOutLng,
+            distanceFromCenterMeters: r.distanceFromCenterMeters,
+            distanceFromCenterCheckoutMeters:
+              r.distanceFromCenterCheckoutMeters,
+          }));
+          return res.json({ from: fromStart, to: toEnd, records: mapped });
+        }
+
+        // default CSV
+        res.setHeader("Content-Type", "text/csv; charset=utf-8");
+        res.setHeader(
+          "Content-Disposition",
+          `attachment; filename="attendance_${studentUserId}_${fromStr}_${toStr}.csv"`
+        );
+
+        const header = [
+          "id",
+          "check_in_at",
+          "check_out_at",
+          "status",
+          "check_in_lat",
+          "check_in_lng",
+          "check_out_lat",
+          "check_out_lng",
+          "distance_from_center_m",
+          "distance_from_center_checkout_m",
+        ];
+
+        const lines = [header.join(",")];
+
+        for (const r of rows) {
+          const row = [
+            r.id,
+            r.checkInAt ? r.checkInAt.toISOString() : "",
+            r.checkOutAt ? r.checkOutAt.toISOString() : "",
+            r.status || "",
+            r.checkInLat != null ? Number(r.checkInLat) : "",
+            r.checkInLng != null ? Number(r.checkInLng) : "",
+            r.checkOutLat != null ? Number(r.checkOutLat) : "",
+            r.checkOutLng != null ? Number(r.checkOutLng) : "",
+            r.distanceFromCenterMeters != null
+              ? Number(r.distanceFromCenterMeters)
+              : "",
+            r.distanceFromCenterCheckoutMeters != null
+              ? Number(r.distanceFromCenterCheckoutMeters)
+              : "",
+          ];
+          lines.push(row.join(","));
+        }
+
+        res.send(lines.join("\n"));
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "student_export_failed" });
+      }
+    }
+  );
+
+  // ─────────────────────────
+  // ADMIN APIs (protected)
+  // ─────────────────────────
+
+  router.get(
+    "/admin/attendance-report",
+    simpleAuth,
+    requireRole("admin"),
+    async (req, res) => {
+      try {
+        const centerId = req.query.centerId ? Number(req.query.centerId) : null;
+        const grade = req.query.grade ? String(req.query.grade) : null;
+        const status = req.query.status ? String(req.query.status) : null;
+        const dateFromStr = req.query.dateFrom
+          ? String(req.query.dateFrom)
+          : null;
+        const dateToStr = req.query.dateTo ? String(req.query.dateTo) : null;
+
+        let page = parseInt(String(req.query.page || "1"), 10);
+        let pageSize = parseInt(String(req.query.pageSize || "50"), 10);
+
+        if (Number.isNaN(page) || page < 1) page = 1;
+        if (Number.isNaN(pageSize) || pageSize < 1) pageSize = 50;
+        if (pageSize > 500) pageSize = 500;
+
+        const now = new Date();
+        let fromDate = dateFromStr ? new Date(dateFromStr) : null;
+        let toDate = dateToStr ? new Date(dateToStr) : null;
+
+        if (fromDate && Number.isNaN(fromDate.getTime())) {
+          return res.status(400).json({ error: "invalid_dateFrom" });
+        }
+        if (toDate && Number.isNaN(toDate.getTime())) {
+          return res.status(400).json({ error: "invalid_dateTo" });
+        }
+
+        if (!fromDate && !toDate) {
+          toDate = now;
+          fromDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+        } else if (fromDate && !toDate) {
+          toDate = now;
+        } else if (!fromDate && toDate) {
+          fromDate = new Date(toDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+        }
+
+        const fromStart = new Date(
+          Date.UTC(
+            fromDate.getUTCFullYear(),
+            fromDate.getUTCMonth(),
+            fromDate.getUTCDate(),
+            0,
+            0,
+            0
+          )
+        );
+        const toEnd = new Date(
+          Date.UTC(
+            toDate.getUTCFullYear(),
+            toDate.getUTCMonth(),
+            toDate.getUTCDate() + 1,
+            0,
+            0,
+            0
+          )
+        );
+
+        const conditions = [
+          gte(attendanceRecords.checkInAt, fromStart),
+          lt(attendanceRecords.checkInAt, toEnd),
+        ];
+
+        if (centerId) {
+          conditions.push(eq(attendanceRecords.centerId, centerId));
+        }
+        if (grade) {
+          conditions.push(eq(students.grade, grade));
+        }
+        if (status) {
+          conditions.push(eq(attendanceRecords.status, status));
+        }
+
+        const whereExpr = and(...conditions);
+        const offset = (page - 1) * pageSize;
+
+        const [countRow] = await db
+          .select({ count: sql`count(*)` })
+          .from(attendanceRecords)
+          .leftJoin(students, eq(attendanceRecords.studentId, students.id))
+          .leftJoin(users, eq(students.userId, users.id))
+          .leftJoin(centers, eq(attendanceRecords.centerId, centers.id))
+          .where(whereExpr);
+
+        const total = Number(countRow?.count || 0);
+        const totalPages = total > 0 ? Math.ceil(total / pageSize) : 0;
+
+        const rows = await db
+          .select({
+            id: attendanceRecords.id,
+            checkInAt: attendanceRecords.checkInAt,
+            checkOutAt: attendanceRecords.checkOutAt,
+            status: attendanceRecords.status,
+            checkInLat: attendanceRecords.checkInLat,
+            checkInLng: attendanceRecords.checkInLng,
+            checkOutLat: attendanceRecords.checkOutLat,
+            checkOutLng: attendanceRecords.checkOutLng,
+            distanceFromCenterMeters: attendanceRecords.distanceFromCenterMeters,
+            distanceFromCenterCheckoutMeters:
+              attendanceRecords.distanceFromCenterCheckoutMeters,
+            studentId: students.id,
+            studentGrade: students.grade,
+            rollNumber: students.rollNumber,
+            userName: users.name,
+            userEmail: users.email,
+            centerId: centers.id,
+            centerName: centers.name,
+            centerCode: centers.code,
+          })
+          .from(attendanceRecords)
+          .leftJoin(students, eq(attendanceRecords.studentId, students.id))
+          .leftJoin(users, eq(students.userId, users.id))
+          .leftJoin(centers, eq(attendanceRecords.centerId, centers.id))
+          .where(whereExpr)
+          .orderBy(desc(attendanceRecords.checkInAt))
+          .limit(pageSize)
+          .offset(offset);
+
         const mapped = rows.map((r) => ({
           id: r.id,
+          studentId: r.studentId,
+          studentName: r.userName || "Unknown",
+          studentEmail: r.userEmail || null,
+          grade: r.studentGrade || null,
+          rollNumber: r.rollNumber || null,
+          centerId: r.centerId,
+          centerName: r.centerName,
+          centerCode: r.centerCode,
           checkInAt: r.checkInAt,
           checkOutAt: r.checkOutAt,
-          status: r.status,
-          checkInLat: r.checkInLat,
-          checkInLng: r.checkInLng,
-          checkOutLat: r.checkOutLat,
-          checkOutLng: r.checkOutLng,
-          distanceFromCenterMeters: r.distanceFromCenterMeters,
-          distanceFromCenterCheckoutMeters: r.distanceFromCenterCheckoutMeters,
+          status: r.status || "present",
+          checkInLocation:
+            r.checkInLat != null && r.checkInLng != null
+              ? { lat: Number(r.checkInLat), lng: Number(r.checkInLng) }
+              : null,
+          checkOutLocation:
+            r.checkOutLat != null && r.checkOutLng != null
+              ? { lat: Number(r.checkOutLat), lng: Number(r.checkOutLng) }
+              : null,
+          distanceFromCenterMeters:
+            r.distanceFromCenterMeters != null
+              ? Number(r.distanceFromCenterMeters)
+              : null,
+          distanceFromCenterCheckoutMeters:
+            r.distanceFromCenterCheckoutMeters != null
+              ? Number(r.distanceFromCenterCheckoutMeters)
+              : null,
         }));
-        return res.json({ from: fromStart, to: toEnd, records: mapped });
+
+        res.json({
+          meta: {
+            page,
+            pageSize,
+            total,
+            totalPages,
+            dateFrom: fromStart,
+            dateTo: toEnd,
+          },
+          rows: mapped,
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "admin_attendance_report_failed" });
       }
+    }
+  );
 
-      // default: CSV
-      res.setHeader("Content-Type", "text/csv; charset=utf-8");
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="attendance_${studentUserId}_${fromStr}_${toStr}.csv"`
-      );
+  router.get(
+    "/admin/students/export",
+    simpleAuth,
+    requireRole("admin"),
+    async (req, res) => {
+      try {
+        const centerId = req.query.centerId ? Number(req.query.centerId) : null;
 
-      const header = [
-        "id",
-        "check_in_at",
-        "check_out_at",
-        "status",
-        "check_in_lat",
-        "check_in_lng",
-        "check_out_lat",
-        "check_out_lng",
-        "distance_from_center_m",
-        "distance_from_center_checkout_m",
-      ];
+        const conditions = [];
+        if (centerId) {
+          conditions.push(eq(students.centerId, centerId));
+        }
+        const whereExpr = conditions.length ? and(...conditions) : undefined;
 
-      const lines = [header.join(",")];
+        let query = db
+          .select({
+            studentId: students.id,
+            userId: users.id,
+            name: users.name,
+            email: users.email,
+            passwordHash: users.passwordHash,
+            grade: students.grade,
+            rollNumber: students.rollNumber,
+            centerName: centers.name,
+            centerCode: centers.code,
+          })
+          .from(students)
+          .leftJoin(users, eq(students.userId, users.id))
+          .leftJoin(centers, eq(students.centerId, centers.id));
 
-      for (const r of rows) {
-        const row = [
-          r.id,
-          r.checkInAt ? r.checkInAt.toISOString() : "",
-          r.checkOutAt ? r.checkOutAt.toISOString() : "",
-          r.status || "",
-          r.checkInLat != null ? Number(r.checkInLat) : "",
-          r.checkInLng != null ? Number(r.checkInLng) : "",
-          r.checkOutLat != null ? Number(r.checkOutLat) : "",
-          r.checkOutLng != null ? Number(r.checkOutLng) : "",
-          r.distanceFromCenterMeters != null
-            ? Number(r.distanceFromCenterMeters)
-            : "",
-          r.distanceFromCenterCheckoutMeters != null
-            ? Number(r.distanceFromCenterCheckoutMeters)
-            : "",
+        if (whereExpr) {
+          query = query.where(whereExpr);
+        }
+
+        const rows = await query;
+
+        res.setHeader("Content-Type", "text/csv; charset=utf-8");
+        res.setHeader(
+          "Content-Disposition",
+          `attachment; filename="students_${centerId || "all"}.csv"`
+        );
+
+        const header = [
+          "student_id",
+          "user_id",
+          "name",
+          "email",
+          "password_hash",
+          "grade",
+          "roll_number",
+          "center_name",
+          "center_code",
         ];
-        lines.push(row.join(","));
-      }
+        const lines = [header.join(",")];
 
-      res.send(lines.join("\n"));
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "student_export_failed" });
+        for (const r of rows) {
+          const row = [
+            r.studentId,
+            r.userId,
+            r.name || "",
+            r.email || "",
+            r.passwordHash || "",
+            r.grade || "",
+            r.rollNumber || "",
+            r.centerName || "",
+            r.centerCode || "",
+          ];
+          lines.push(row.join(","));
+        }
+
+        res.send(lines.join("\n"));
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "admin_students_export_failed" });
+      }
     }
-  });
+  );
 
+  router.get(
+    "/admin/stats",
+    simpleAuth,
+    requireRole("admin"),
+    async (_req, res) => {
+      try {
+        const [studentsCountRow] = await db
+          .select({ count: sql`count(*)` })
+          .from(students);
 
+        const totalStudents = Number(studentsCountRow?.count || 0);
 
+        const now = new Date();
+        const todayStart = new Date(
+          Date.UTC(
+            now.getUTCFullYear(),
+            now.getUTCMonth(),
+            now.getUTCDate(),
+            0,
+            0,
+            0
+          )
+        );
+        const tomorrowStart = new Date(todayStart);
+        tomorrowStart.setUTCDate(todayStart.getUTCDate() + 1);
 
-     /**
-   * POST /admin/students
-   * Body: { name, email, password, centerId, grade?, rollNumber? }
-   */
-  router.post("/admin/students", async (req, res) => {
-    try {
-      const { name, email, password, centerId, grade, rollNumber } =
-        req.body || {};
+        const [presentRow] = await db
+          .select({ count: sql`count(*)` })
+          .from(attendanceRecords)
+          .where(
+            and(
+              eq(attendanceRecords.status, "present"),
+              gte(attendanceRecords.checkInAt, todayStart),
+              lt(attendanceRecords.checkInAt, tomorrowStart)
+            )
+          );
 
-      if (!name || !email || !password || !centerId) {
-        return res.status(400).json({ error: "missing_fields" });
+        const presentToday = Number(presentRow?.count || 0);
+        const attendanceRate =
+          totalStudents > 0
+            ? Math.round((presentToday / totalStudents) * 100)
+            : 0;
+
+        res.json({
+          totalStudents,
+          presentToday,
+          attendanceRate,
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "admin_stats_failed" });
       }
-
-      // ensure center exists
-      const [center] = await db
-        .select()
-        .from(centers)
-        .where(eq(centers.id, Number(centerId)));
-
-      if (!center) {
-        return res.status(400).json({ error: "center_not_found" });
-      }
-
-      const normalizedEmail = String(email).toLowerCase().trim();
-
-      // 1) Check if user with this email already exists
-      const [existingUser] = await db
-        .select()
-        .from(users)
-        .where(eq(users.email, normalizedEmail));
-
-      if (existingUser) {
-        // You can decide behaviour:
-        // - either treat as error:
-        return res.status(409).json({ error: "user_already_exists" });
-
-        // OR:
-        // - attach a student profile to existing user if they don't have one.
-        // I'll keep it simple with the 409 above.
-      }
-
-      // 2) Create user
-      const userInsertResult = await db.insert(users).values({
-        name,
-        email: normalizedEmail,
-        passwordHash: password, // TODO: bcrypt in real life
-        role: "student",
-      });
-
-      const userId = userInsertResult.insertId;
-
-      // 3) Re-fetch user by email (safer than trusting insertId type)
-      const [user] = await db
-        .select()
-        .from(users)
-        .where(eq(users.id, userId));
-
-      if (!user) {
-        return res.status(500).json({ error: "user_creation_failed" });
-      }
-
-      // 4) Create student profile
-      const studentInsertResult = await db.insert(students).values({
-        userId: user.id,
-        centerId: center.id,
-        grade: grade || null,
-        rollNumber: rollNumber || null,
-      });
-
-      const studentId = studentInsertResult.insertId;
-
-      const [student] = await db
-        .select()
-        .from(students)
-        .where(eq(students.id, studentId));
-
-      if (!student) {
-        return res
-          .status(500)
-          .json({ error: "student_creation_failed", userId: user.id });
-      }
-
-      return res.status(201).json({ user, student });
-    } catch (err) {
-      console.error("admin_add_student_failed:", err);
-      return res.status(500).json({ error: "admin_add_student_failed" });
     }
-  });
+  );
 
+  router.get(
+    "/admin/attendance-records",
+    simpleAuth,
+    requireRole("admin"),
+    async (_req, res) => {
+      try {
+        const rows = await db
+          .select({
+            id: attendanceRecords.id,
+            date: attendanceRecords.checkInAt,
+            status: attendanceRecords.status,
+            checkInLat: attendanceRecords.checkInLat,
+            checkInLng: attendanceRecords.checkInLng,
+            studentId: students.id,
+            studentGrade: students.grade,
+            userName: users.name,
+          })
+          .from(attendanceRecords)
+          .leftJoin(students, eq(attendanceRecords.studentId, students.id))
+          .leftJoin(users, eq(students.userId, users.id))
+          .orderBy(desc(attendanceRecords.checkInAt))
+          .limit(200);
 
-    /**
-   * DELETE /admin/students/:studentId
-   *
-   * - Deletes student profile
-   * - Also deletes user if role === 'student'
-   */
-  router.delete("/admin/students/:studentId", async (req, res) => {
-    try {
-      const studentId = Number(req.params.studentId);
-      if (!studentId) {
-        return res.status(400).json({ error: "invalid_student_id" });
+        const mapped = rows.map((r) => ({
+          id: r.id,
+          userId: String(r.studentId ?? ""),
+          userName: r.userName || "Unknown",
+          userGrade: r.studentGrade || "N/A",
+          date: r.date,
+          time: r.date != null ? r.date.toISOString() : null,
+          status: r.status || "present",
+          location:
+            r.checkInLat != null && r.checkInLng != null
+              ? { lat: Number(r.checkInLat), lng: Number(r.checkInLng) }
+              : null,
+        }));
+
+        res.json(mapped);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "admin_records_failed" });
       }
-
-      const [student] = await db
-        .select()
-        .from(students)
-        .where(eq(students.id, studentId));
-
-      if (!student) {
-        return res.status(404).json({ error: "student_not_found" });
-      }
-
-      const [user] = await db
-        .select()
-        .from(users)
-        .where(eq(users.id, student.userId));
-
-      // delete student first (FK)
-      await db.delete(students).where(eq(students.id, studentId));
-
-      // delete user only if it's a pure student account
-      if (user && user.role === "student") {
-        await db.delete(users).where(eq(users.id, user.id));
-      }
-
-      res.json({ ok: true });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "admin_delete_student_failed" });
     }
-  });
+  );
 
-    /**
-   * PATCH /admin/centers/:centerId/location
-   * Body: { lat: number, lng: number, radiusMeters: number }
-   */
-  router.patch("/admin/centers/:centerId/location", async (req, res) => {
-    try {
-      const centerId = Number(req.params.centerId);
-      const { lat, lng, radiusMeters } = req.body || {};
+  router.post(
+    "/admin/students",
+    simpleAuth,
+    requireRole("admin"),
+    async (req, res) => {
+      try {
+        const { name, email, password, centerId, grade, rollNumber } =
+          req.body || {};
 
-      if (
-        !centerId ||
-        lat == null ||
-        lng == null ||
-        radiusMeters == null ||
-        Number.isNaN(Number(lat)) ||
-        Number.isNaN(Number(lng)) ||
-        Number.isNaN(Number(radiusMeters))
-      ) {
-        return res.status(400).json({ error: "invalid_payload" });
+        if (!name || !email || !password || !centerId) {
+          return res.status(400).json({ error: "missing_fields" });
+        }
+
+        const [center] = await db
+          .select()
+          .from(centers)
+          .where(eq(centers.id, Number(centerId)));
+
+        if (!center) {
+          return res.status(400).json({ error: "center_not_found" });
+        }
+
+        const normalizedEmail = String(email).toLowerCase().trim();
+
+        const [existingUser] = await db
+          .select()
+          .from(users)
+          .where(eq(users.email, normalizedEmail));
+
+        if (existingUser) {
+          return res.status(409).json({ error: "user_already_exists" });
+        }
+
+        const userInsertResult = await db.insert(users).values({
+          name,
+          email: normalizedEmail,
+          passwordHash: password,
+          role: "student",
+        });
+
+        const userId = userInsertResult.insertId;
+
+        const [user] = await db
+          .select()
+          .from(users)
+          .where(eq(users.id, userId));
+
+        if (!user) {
+          return res.status(500).json({ error: "user_creation_failed" });
+        }
+
+        const studentInsertResult = await db.insert(students).values({
+          userId: user.id,
+          centerId: center.id,
+          grade: grade || null,
+          rollNumber: rollNumber || null,
+        });
+
+        const studentId = studentInsertResult.insertId;
+
+        const [student] = await db
+          .select()
+          .from(students)
+          .where(eq(students.id, studentId));
+
+        if (!student) {
+          return res
+            .status(500)
+            .json({ error: "student_creation_failed", userId: user.id });
+        }
+
+        return res.status(201).json({ user, student });
+      } catch (err) {
+        console.error("admin_add_student_failed:", err);
+        return res.status(500).json({ error: "admin_add_student_failed" });
       }
-
-      if (Number(radiusMeters) <= 0) {
-        return res.status(400).json({ error: "radius_must_be_positive" });
-      }
-
-      const [center] = await db
-        .select()
-        .from(centers)
-        .where(eq(centers.id, centerId));
-
-      if (!center) {
-        return res.status(404).json({ error: "center_not_found" });
-      }
-
-      await db
-        .update(centers)
-        .set({
-          lat: Number(lat),
-          lng: Number(lng),
-          radiusMeters: Number(radiusMeters),
-        })
-        .where(eq(centers.id, centerId));
-
-      const [updated] = await db
-        .select()
-        .from(centers)
-        .where(eq(centers.id, centerId));
-
-      res.json({ ok: true, center: updated || null });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "admin_update_center_location_failed" });
     }
-  });
+  );
 
+  router.delete(
+    "/admin/students/:studentId",
+    simpleAuth,
+    requireRole("admin"),
+    async (req, res) => {
+      try {
+        const studentId = Number(req.params.studentId);
+        if (!studentId) {
+          return res.status(400).json({ error: "invalid_student_id" });
+        }
 
-    /**
-   * POST /admin/students/import
-   *
-   * Content-Type: multipart/form-data
-   * Body:
-   *   file: CSV file
-   *
-   * CSV header expected:
-   *   name,email,password,role,centerCode,grade,rollNumber
-   *
-   * Behavior:
-   *   - For each row:
-   *       - If user with same email exists -> skip (counted as skippedExisting)
-   *       - Else create user (role=admin/student)
-   *       - If role=student and centerCode is valid -> create students row
-   *   - Returns JSON summary with counts and per-row issues.
-   */
+        const [student] = await db
+          .select()
+          .from(students)
+          .where(eq(students.id, studentId));
+
+        if (!student) {
+          return res.status(404).json({ error: "student_not_found" });
+        }
+
+        const [user] = await db
+          .select()
+          .from(users)
+          .where(eq(users.id, student.userId));
+
+        await db.delete(students).where(eq(students.id, studentId));
+
+        if (user && user.role === "student") {
+          await db.delete(users).where(eq(users.id, user.id));
+        }
+
+        res.json({ ok: true });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "admin_delete_student_failed" });
+      }
+    }
+  );
+
+  router.patch(
+    "/admin/centers/:centerId/location",
+    simpleAuth,
+    requireRole("admin"),
+    async (req, res) => {
+      try {
+        const centerId = Number(req.params.centerId);
+        const { lat, lng, radiusMeters } = req.body || {};
+
+        if (
+          !centerId ||
+          lat == null ||
+          lng == null ||
+          radiusMeters == null ||
+          Number.isNaN(Number(lat)) ||
+          Number.isNaN(Number(lng)) ||
+          Number.isNaN(Number(radiusMeters))
+        ) {
+          return res.status(400).json({ error: "invalid_payload" });
+        }
+
+        if (Number(radiusMeters) <= 0) {
+          return res.status(400).json({ error: "radius_must_be_positive" });
+        }
+
+        const [center] = await db
+          .select()
+          .from(centers)
+          .where(eq(centers.id, centerId));
+
+        if (!center) {
+          return res.status(404).json({ error: "center_not_found" });
+        }
+
+        await db
+          .update(centers)
+          .set({
+            lat: Number(lat),
+            lng: Number(lng),
+            radiusMeters: Number(radiusMeters),
+          })
+          .where(eq(centers.id, centerId));
+
+        const [updated] = await db
+          .select()
+          .from(centers)
+          .where(eq(centers.id, centerId));
+
+        res.json({ ok: true, center: updated || null });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "admin_update_center_location_failed" });
+      }
+    }
+  );
+
   router.post(
     "/admin/students/import",
+    simpleAuth,
+    requireRole("admin"),
     upload.single("file"),
     async (req, res) => {
       try {
@@ -1357,8 +1337,6 @@ export function createRouter() {
         let skippedExisting = 0;
         let rowErrors = [];
 
-        // Simple CSV splitting; if you need quoted values with commas,
-        // consider using a CSV library instead.
         for (let i = 1; i < lines.length; i++) {
           const line = lines[i];
           if (!line) continue;
@@ -1376,7 +1354,7 @@ export function createRouter() {
           const rollNumber =
             idxRollNumber !== -1 ? (parts[idxRollNumber] || "").trim() : "";
 
-          const rowNumber = i + 1; // for messages
+          const rowNumber = i + 1;
 
           if (!name || !email || !password) {
             rowErrors.push({
@@ -1390,7 +1368,6 @@ export function createRouter() {
           const role = roleRaw === "admin" ? "admin" : "student";
 
           try {
-            // Check if user exists
             const [existing] = await db
               .select()
               .from(users)
@@ -1401,7 +1378,6 @@ export function createRouter() {
               continue;
             }
 
-            // TODO: In production hash with bcrypt
             const userInsert = await db.insert(users).values({
               name,
               email,
@@ -1474,175 +1450,152 @@ export function createRouter() {
       }
     }
   );
-  /**
-   * GET /admin/attendance-report/export
-   *
-   * Query params (all optional, same as /admin/attendance-report):
-   *   centerId?: number
-   *   grade?: string
-   *   status?: string
-   *   dateFrom?: YYYY-MM-DD
-   *   dateTo?: YYYY-MM-DD
-   *
-   * Returns: CSV file (attachment)
-   */
-  router.get("/admin/attendance-report/export", async (req, res) => {
-    try {
-      const { centerId, grade, status, dateFrom, dateTo } = req.query || {};
 
-      // Build WHERE conditions
-      const whereClauses = [];
+  router.get(
+    "/admin/attendance-report/export",
+    simpleAuth,
+    requireRole("admin"),
+    async (req, res) => {
+      try {
+        const { centerId, grade, status, dateFrom, dateTo } = req.query || {};
 
-      // Date range filter (inclusive start, exclusive end)
-      if (dateFrom) {
-        const fromDate = new Date(`${dateFrom}T00:00:00.000Z`);
-        if (!Number.isNaN(fromDate.getTime())) {
-          whereClauses.push(gte(attendanceRecords.checkInAt, fromDate));
+        const whereClauses = [];
+
+        if (dateFrom) {
+          const fromDate = new Date(`${dateFrom}T00:00:00.000Z`);
+          if (!Number.isNaN(fromDate.getTime())) {
+            whereClauses.push(gte(attendanceRecords.checkInAt, fromDate));
+          }
         }
-      }
 
-      if (dateTo) {
-        // exclusive upper bound: next day at 00:00 UTC
-        const toDate = new Date(`${dateTo}T00:00:00.000Z`);
-        if (!Number.isNaN(toDate.getTime())) {
-          const endExclusive = new Date(toDate);
-          endExclusive.setUTCDate(endExclusive.getUTCDate() + 1);
-          whereClauses.push(lt(attendanceRecords.checkInAt, endExclusive));
+        if (dateTo) {
+          const toDate = new Date(`${dateTo}T00:00:00.000Z`);
+          if (!Number.isNaN(toDate.getTime())) {
+            const endExclusive = new Date(toDate);
+            endExclusive.setUTCDate(endExclusive.getUTCDate() + 1);
+            whereClauses.push(lt(attendanceRecords.checkInAt, endExclusive));
+          }
         }
-      }
 
-      if (centerId) {
-        whereClauses.push(eq(attendanceRecords.centerId, Number(centerId)));
-      }
+        if (centerId) {
+          whereClauses.push(eq(attendanceRecords.centerId, Number(centerId)));
+        }
 
-      if (status) {
-        whereClauses.push(eq(attendanceRecords.status, String(status)));
-      }
+        if (status) {
+          whereClauses.push(eq(attendanceRecords.status, String(status)));
+        }
 
-      if (grade) {
-        // filter via students.grade, so we’ll add this after joins using and()
-        // we can't use students.grade here yet, so we’ll handle below
-      }
+        let query = db
+          .select({
+            id: attendanceRecords.id,
+            checkInAt: attendanceRecords.checkInAt,
+            status: attendanceRecords.status,
+            checkInLat: attendanceRecords.checkInLat,
+            checkInLng: attendanceRecords.checkInLng,
+            studentId: students.id,
+            studentGrade: students.grade,
+            studentRoll: students.rollNumber,
+            studentName: users.name,
+            studentEmail: users.email,
+            centerId: centers.id,
+            centerName: centers.name,
+            centerCode: centers.code,
+          })
+          .from(attendanceRecords)
+          .leftJoin(students, eq(attendanceRecords.studentId, students.id))
+          .leftJoin(users, eq(students.userId, users.id))
+          .leftJoin(centers, eq(attendanceRecords.centerId, centers.id));
 
-      // Base query with joins
-      let query = db
-        .select({
-          id: attendanceRecords.id,
-          checkInAt: attendanceRecords.checkInAt,
-          status: attendanceRecords.status,
-          checkInLat: attendanceRecords.checkInLat,
-          checkInLng: attendanceRecords.checkInLng,
-          studentId: students.id,
-          studentGrade: students.grade,
-          studentRoll: students.rollNumber,
-          studentName: users.name,
-          studentEmail: users.email,
-          centerId: centers.id,
-          centerName: centers.name,
-          centerCode: centers.code,
-        })
-        .from(attendanceRecords)
-        .leftJoin(students, eq(attendanceRecords.studentId, students.id))
-        .leftJoin(users, eq(students.userId, users.id))
-        .leftJoin(centers, eq(attendanceRecords.centerId, centers.id));
+        if (whereClauses.length > 0) {
+          query = query.where(and(...whereClauses));
+        }
 
-      if (whereClauses.length > 0) {
-        query = query.where(and(...whereClauses));
-      }
+        if (grade) {
+          query = query.where(
+            and(
+              ...(whereClauses.length > 0 ? whereClauses : []),
+              eq(students.grade, String(grade))
+            )
+          );
+        }
 
-      // extra grade filter via joined students table (if provided)
-      if (grade) {
-        query = query.where(
-          and(
-            ...(whereClauses.length > 0 ? whereClauses : []),
-            eq(students.grade, String(grade))
-          )
+        const rows = await query.orderBy(desc(attendanceRecords.checkInAt));
+
+        const escapeCsv = (value) => {
+          if (value == null) return "";
+          const str = String(value);
+          const escaped = str.replace(/"/g, '""');
+          return `"${escaped}"`;
+        };
+
+        const header = [
+          "Record ID",
+          "Date",
+          "Time",
+          "Status",
+          "Student ID",
+          "Student Name",
+          "Student Email",
+          "Grade",
+          "Roll Number",
+          "Center ID",
+          "Center Name",
+          "Center Code",
+          "Check-in Lat",
+          "Check-in Lng",
+        ];
+
+        const lines = [header.join(",")];
+
+        for (const r of rows) {
+          const dt = r.checkInAt ? new Date(r.checkInAt) : null;
+          const dateStr = dt ? dt.toISOString().slice(0, 10) : "";
+          const timeStr = dt ? dt.toISOString().slice(11, 19) : "";
+
+          const line = [
+            escapeCsv(r.id),
+            escapeCsv(dateStr),
+            escapeCsv(timeStr),
+            escapeCsv(r.status || "present"),
+            escapeCsv(r.studentId ?? ""),
+            escapeCsv(r.studentName || ""),
+            escapeCsv(r.studentEmail || ""),
+            escapeCsv(r.studentGrade || ""),
+            escapeCsv(r.studentRoll || ""),
+            escapeCsv(r.centerId ?? ""),
+            escapeCsv(r.centerName || ""),
+            escapeCsv(r.centerCode || ""),
+            escapeCsv(
+              r.checkInLat != null ? Number(r.checkInLat).toFixed(6) : ""
+            ),
+            escapeCsv(
+              r.checkInLng != null ? Number(r.checkInLng).toFixed(6) : ""
+            ),
+          ].join(",");
+
+          lines.push(line);
+        }
+
+        const csv = lines.join("\n");
+
+        const safeFrom = dateFrom || "all";
+        const safeTo = dateTo || "all";
+        const fileName = `attendance_report_${safeFrom}_to_${safeTo}.csv`;
+
+        res.setHeader("Content-Type", "text/csv; charset=utf-8");
+        res.setHeader(
+          "Content-Disposition",
+          `attachment; filename="${fileName}"`
         );
+        res.status(200).send(csv);
+      } catch (err) {
+        console.error("admin_attendance_report_export_failed:", err);
+        res
+          .status(500)
+          .json({ error: "admin_attendance_report_export_failed" });
       }
-
-      // You can add an upper limit if needed, e.g. .limit(10000)
-      const rows = await query.orderBy(desc(attendanceRecords.checkInAt));
-
-      // Build CSV
-      const escapeCsv = (value) => {
-        if (value == null) return "";
-        const str = String(value);
-        // escape double quotes by doubling them
-        const escaped = str.replace(/"/g, '""');
-        return `"${escaped}"`;
-      };
-
-      const header = [
-        "Record ID",
-        "Date",
-        "Time",
-        "Status",
-        "Student ID",
-        "Student Name",
-        "Student Email",
-        "Grade",
-        "Roll Number",
-        "Center ID",
-        "Center Name",
-        "Center Code",
-        "Check-in Lat",
-        "Check-in Lng",
-      ];
-
-      const lines = [header.join(",")];
-
-      for (const r of rows) {
-        const dt = r.checkInAt ? new Date(r.checkInAt) : null;
-        const dateStr = dt
-          ? dt.toISOString().slice(0, 10) // YYYY-MM-DD
-          : "";
-        const timeStr = dt ? dt.toISOString().slice(11, 19) : ""; // HH:MM:SS
-
-        const line = [
-          escapeCsv(r.id),
-          escapeCsv(dateStr),
-          escapeCsv(timeStr),
-          escapeCsv(r.status || "present"),
-          escapeCsv(r.studentId ?? ""),
-          escapeCsv(r.studentName || ""),
-          escapeCsv(r.studentEmail || ""),
-          escapeCsv(r.studentGrade || ""),
-          escapeCsv(r.studentRoll || ""),
-          escapeCsv(r.centerId ?? ""),
-          escapeCsv(r.centerName || ""),
-          escapeCsv(r.centerCode || ""),
-          escapeCsv(
-            r.checkInLat != null ? Number(r.checkInLat).toFixed(6) : ""
-          ),
-          escapeCsv(
-            r.checkInLng != null ? Number(r.checkInLng).toFixed(6) : ""
-          ),
-        ].join(",");
-
-        lines.push(line);
-      }
-
-      const csv = lines.join("\n");
-
-      // Build filename from filters
-      const safeFrom = dateFrom || "all";
-      const safeTo = dateTo || "all";
-      const fileName = `attendance_report_${safeFrom}_to_${safeTo}.csv`;
-
-      res.setHeader("Content-Type", "text/csv; charset=utf-8");
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="${fileName}"`
-      );
-      res.status(200).send(csv);
-    } catch (err) {
-      console.error("admin_attendance_report_export_failed:", err);
-      res
-        .status(500)
-        .json({ error: "admin_attendance_report_export_failed" });
     }
-  });
-
+  );
 
   return router;
 }
@@ -1666,5 +1619,3 @@ function haversine(lat1, lon1, lat2, lon2) {
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
-
-

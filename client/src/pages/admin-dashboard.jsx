@@ -109,6 +109,17 @@ export default function AdminDashboard() {
   const [centerUpdateLoading, setCenterUpdateLoading] = useState(false);
   const [centerUpdateMessage, setCenterUpdateMessage] = useState(null);
 
+  // ─────────────────────────────
+  // NEW: helper for header-based auth
+  // ─────────────────────────────
+  const getAuthHeaders = () => {
+    if (!user) return {};
+    return {
+      "x-user-id": String(user.id),
+      "x-user-password": user.passwordHash, // stored from login
+    };
+  };
+
   // Redirect if not admin
   useEffect(() => {
     if (!user) {
@@ -129,12 +140,20 @@ export default function AdminDashboard() {
         setLoading(true);
         setError(null);
 
+        const authHeaders = getAuthHeaders();
+
         const [statsRes, recordsRes] = await Promise.all([
           fetch(buildUrl("/admin/stats"), {
             credentials: "include",
+            headers: {
+              ...authHeaders,
+            },
           }),
           fetch(buildUrl("/admin/attendance-records"), {
             credentials: "include",
+            headers: {
+              ...authHeaders,
+            },
           }),
         ]);
 
@@ -239,7 +258,14 @@ export default function AdminDashboard() {
       setReportLoading(true);
       setReportError(null);
 
-      const res = await fetch(url, { credentials: "include" });
+      const authHeaders = getAuthHeaders();
+
+      const res = await fetch(url, {
+        credentials: "include",
+        headers: {
+          ...authHeaders,
+        },
+      });
       if (!res.ok) {
         const text = (await res.text()) || res.statusText;
         throw new Error(text);
@@ -285,7 +311,14 @@ export default function AdminDashboard() {
     try {
       setReportCsvLoading(true);
 
-      const res = await fetch(url, { credentials: "include" });
+      const authHeaders = getAuthHeaders();
+
+      const res = await fetch(url, {
+        credentials: "include",
+        headers: {
+          ...authHeaders,
+        },
+      });
       if (!res.ok) {
         const text = (await res.text()) || res.statusText;
         throw new Error(text);
@@ -323,7 +356,14 @@ export default function AdminDashboard() {
 
       const url = buildUrl(`/admin/students/export?${query.toString()}`);
 
-      const res = await fetch(url, { credentials: "include" });
+      const authHeaders = getAuthHeaders();
+
+      const res = await fetch(url, {
+        credentials: "include",
+        headers: {
+          ...authHeaders,
+        },
+      });
       if (!res.ok) {
         const text = (await res.text()) || res.statusText;
         throw new Error(text);
@@ -365,10 +405,15 @@ export default function AdminDashboard() {
       setStudentAddLoading(true);
       setStudentAddMessage(null);
 
+      const authHeaders = getAuthHeaders();
+
       const res = await fetch(buildUrl("/admin/students"), {
         method: "POST",
         credentials: "include",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders,
+        },
         body: JSON.stringify({
           name,
           email,
@@ -430,11 +475,16 @@ export default function AdminDashboard() {
       setStudentDeleteLoading(true);
       setStudentDeleteMessage(null);
 
+      const authHeaders = getAuthHeaders();
+
       const res = await fetch(
         buildUrl(`/admin/students/${encodeURIComponent(studentDeleteId)}`),
         {
           method: "DELETE",
           credentials: "include",
+          headers: {
+            ...authHeaders,
+          },
         }
       );
 
@@ -480,9 +530,14 @@ export default function AdminDashboard() {
       const formData = new FormData();
       formData.append("file", importFile);
 
+      const authHeaders = getAuthHeaders();
+
       const res = await fetch(buildUrl("/admin/students/import"), {
         method: "POST",
         credentials: "include",
+        headers: {
+          ...authHeaders,
+        },
         body: formData,
       });
 
@@ -535,12 +590,17 @@ export default function AdminDashboard() {
       setCenterUpdateLoading(true);
       setCenterUpdateMessage(null);
 
+      const authHeaders = getAuthHeaders();
+
       const res = await fetch(
         buildUrl(`/admin/centers/${encodeURIComponent(centerId)}/location`),
         {
           method: "PATCH",
           credentials: "include",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...authHeaders,
+          },
           body: JSON.stringify({
             lat: Number(lat),
             lng: Number(lng),

@@ -53,6 +53,15 @@ export default function StudentDashboard() {
 
   const studentId = user?.id || null;
 
+  // Helper: build auth headers for secure routes
+  const getAuthHeaders = () => {
+    if (!user) return {};
+    return {
+      "x-user-id": String(user.id),
+      "x-user-password": user.passwordHash, // same value stored in DB
+    };
+  };
+
   // Redirect if not logged in
   useEffect(() => {
     if (!user) setLocation("/");
@@ -69,17 +78,23 @@ export default function StudentDashboard() {
         setLoadingGeofence(true);
         setLoadingHistory(true);
 
-        const geofenceUrl = `${API_BASE_URL}/student/geofence${
-          studentId ? `?studentId=${studentId}` : ""
-        }`;
-        const historyUrl = `${API_BASE_URL}/student/attendance-history?studentId=${studentId}`;
+        const authHeaders = getAuthHeaders();
+
+        const geofenceUrl = `${API_BASE_URL}/student/geofence`;
+        const historyUrl = `${API_BASE_URL}/student/attendance-history`;
 
         const [geofenceRes, historyRes] = await Promise.all([
           fetch(geofenceUrl, {
             credentials: "include",
+            headers: {
+              ...authHeaders,
+            },
           }),
           fetch(historyUrl, {
             credentials: "include",
+            headers: {
+              ...authHeaders,
+            },
           }),
         ]);
 
@@ -121,6 +136,7 @@ export default function StudentDashboard() {
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, studentId, toast]);
 
   const calculateDistance = (lat1, lon1, lat2, lon2) => {
@@ -132,8 +148,7 @@ export default function StudentDashboard() {
 
     const a =
       Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-      Math.cos(φ1) * Math.cos(φ2) *
-        Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+      Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 
     return R * c;
@@ -201,8 +216,6 @@ export default function StudentDashboard() {
     }
   };
 
-  
-
   const markAttendance = async () => {
     if (!user || !studentId) return;
 
@@ -237,14 +250,17 @@ export default function StudentDashboard() {
     }
 
     try {
+      const authHeaders = getAuthHeaders();
+
       const res = await fetch(`${API_BASE_URL}/student/attendance/check-in`, {
         method: "POST",
         credentials: "include",
         headers: {
           "Content-Type": "application/json",
+          ...authHeaders,
         },
         body: JSON.stringify({
-          studentId,
+          // studentId is now inferred from headers on backend
           lat: currentLocation.lat,
           lng: currentLocation.lng,
           accuracy: currentLocation.accuracy,
@@ -337,7 +353,6 @@ export default function StudentDashboard() {
       return;
     }
 
-    // optional: enforce in-range for checkout as well
     if (!inRange) {
       toast({
         variant: "destructive",
@@ -350,20 +365,25 @@ export default function StudentDashboard() {
 
     try {
       setLoadingCheckout(true);
+      const authHeaders = getAuthHeaders();
 
-      const res = await fetch(`${API_BASE_URL}/student/attendance/check-out`, {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          studentId,
-          lat: currentLocation.lat,
-          lng: currentLocation.lng,
-          accuracy: currentLocation.accuracy,
-        }),
-      });
+      const res = await fetch(
+        `${API_BASE_URL}/student/attendance/check-out`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "Content-Type": "application/json",
+            ...authHeaders,
+          },
+          body: JSON.stringify({
+            // studentId inferred from headers
+            lat: currentLocation.lat,
+            lng: currentLocation.lng,
+            accuracy: currentLocation.accuracy,
+          }),
+        }
+      );
 
       if (res.status === 409) {
         const body = await res.json().catch(() => ({}));
@@ -398,8 +418,7 @@ export default function StudentDashboard() {
           "bg-slate-50 border-slate-200 text-slate-800 dark:bg-slate-900/30 dark:border-slate-800",
       });
 
-      // Optional: you could refresh attendance history here by re-fetching,
-      // or attach checkout info to the last record.
+      // Optional: refresh history here if you want it to reflect checkout
     } catch (err) {
       console.error("Failed to check out:", err);
       toast({
@@ -431,17 +450,20 @@ export default function StudentDashboard() {
       setReportLoading(true);
 
       const params = new URLSearchParams({
-        studentId: String(studentId),
         from: reportFrom,
         to: reportTo,
         format: "csv",
       });
 
       const url = `${API_BASE_URL}/student/attendance/report?${params.toString()}`;
+      const authHeaders = getAuthHeaders();
 
       const res = await fetch(url, {
         method: "GET",
         credentials: "include",
+        headers: {
+          ...authHeaders,
+        },
       });
 
       if (!res.ok) {
@@ -573,9 +595,7 @@ export default function StudentDashboard() {
                   }}
                 >
                   <MapPin
-                    className={`w-10 h-10 ${
-                      inRange ? "animate-bounce" : ""
-                    }`}
+                    className={`w-10 h-10 ${inRange ? "animate-bounce" : ""}`}
                   />
                   {inRange ? "CHECK IN" : "TOO FAR"}
                 </Button>
@@ -625,7 +645,7 @@ export default function StudentDashboard() {
                 />
                 Refresh GPS
               </Button>
-              
+
               <Button
                 variant="outline"
                 size="sm"
