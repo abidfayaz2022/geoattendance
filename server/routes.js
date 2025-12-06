@@ -9,6 +9,7 @@ import {
   attendanceRecords,
 } from "../shared/schema.js";
 import multer from "multer";
+import { check } from "drizzle-orm/mysql-core";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -1087,6 +1088,12 @@ export function createRouter() {
             studentId: students.id,
             studentGrade: students.grade,
             userName: users.name,
+            checkOutAt: attendanceRecords.checkOutAt,
+            checkOutLat: attendanceRecords.checkOutLat,
+            checkOutLng: attendanceRecords.checkOutLng,
+            checkInAccuracy: attendanceRecords.checkInAccuracy,
+            checkOutAccuracy: attendanceRecords.checkOutAccuracy,
+            
           })
           .from(attendanceRecords)
           .leftJoin(students, eq(attendanceRecords.studentId, students.id))
@@ -1102,10 +1109,19 @@ export function createRouter() {
           date: r.date,
           time: r.date != null ? r.date.toISOString() : null,
           status: r.status || "present",
+          checkOutAt: r.checkOutAt,
+          checkOutTime: r.checkOutAt != null ? r.checkOutAt.toISOString() : null,
+          checkInAt: r.date,
           location:
             r.checkInLat != null && r.checkInLng != null
               ? { lat: Number(r.checkInLat), lng: Number(r.checkInLng) }
               : null,
+          checkOutLocation:
+            r.checkOutLat != null && r.checkOutLng != null
+              ? { lat: Number(r.checkOutLat), lng: Number(r.checkOutLng) }
+              : null,
+          checkInAccuracy: r.checkInAccuracy != null ? Number(r.checkInAccuracy) : null,
+          checkOutAccuracy: r.checkOutAccuracy != null ? Number(r.checkOutAccuracy) : null,
         }));
 
         res.json(mapped);
@@ -1149,21 +1165,29 @@ export function createRouter() {
           return res.status(409).json({ error: "user_already_exists" });
         }
 
+        console.log("Inserting new user with email:", normalizedEmail);
+
+        // const passwordHash = await hashPassword(password);
         const userInsertResult = await db.insert(users).values({
           name,
           email: normalizedEmail,
-          passwordHash: password,
+          passwordHash: password, // TODO: replace with real hash
           role: "student",
         });
 
-        const userId = userInsertResult.insertId;
+        console.log("userInsertResult:", userInsertResult);
 
+        // ✅ Re-fetch by email instead of insertId (email is unique)
         const [user] = await db
           .select()
           .from(users)
-          .where(eq(users.id, userId));
+          .where(eq(users.email, normalizedEmail));
 
         if (!user) {
+          console.error("User not found after insert", {
+            normalizedEmail,
+            userInsertResult,
+          });
           return res.status(500).json({ error: "user_creation_failed" });
         }
 
@@ -1174,14 +1198,25 @@ export function createRouter() {
           rollNumber: rollNumber || null,
         });
 
-        const studentId = studentInsertResult.insertId;
+        const studentId =
+          studentInsertResult?.insertId ??
+          studentInsertResult?.[0]?.insertId ??
+          null;
 
         const [student] = await db
           .select()
           .from(students)
-          .where(eq(students.id, studentId));
+          .where(
+            studentId
+              ? eq(students.id, studentId)
+              : eq(students.userId, user.id) // fallback
+          );
 
         if (!student) {
+          console.error("Student not found after insert", {
+            userId: user.id,
+            studentInsertResult,
+          });
           return res
             .status(500)
             .json({ error: "student_creation_failed", userId: user.id });
@@ -1291,165 +1326,190 @@ export function createRouter() {
   );
 
   router.post(
-    "/admin/students/import",
-    simpleAuth,
-    requireRole("admin"),
-    upload.single("file"),
-    async (req, res) => {
-      try {
-        if (!req.file || !req.file.buffer) {
-          return res.status(400).json({ error: "file_required" });
+  "/admin/students/import",
+  simpleAuth,
+  requireRole("admin"),
+  upload.single("file"),
+  async (req, res) => {
+    try {
+      if (!req.file || !req.file.buffer) {
+        return res.status(400).json({ error: "file_required" });
+      }
+
+      const csvRaw = req.file.buffer.toString("utf8");
+      const lines = csvRaw
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+
+      if (lines.length < 2) {
+        return res.status(400).json({ error: "csv_has_no_data_rows" });
+      }
+
+      const header = lines[0].split(",").map((h) => h.trim());
+      const idx = (name) => header.indexOf(name);
+
+      const idxName = idx("name");
+      const idxEmail = idx("email");
+      const idxPassword = idx("password");
+      const idxRole = idx("role");
+      const idxCenterCode = idx("centerCode");
+      const idxGrade = idx("grade");
+      const idxRollNumber = idx("rollNumber");
+
+      const requiredCols = ["name", "email", "password"];
+      for (const col of requiredCols) {
+        if (idx(col) === -1) {
+          return res.status(400).json({
+            error: "missing_required_column",
+            column: col,
+          });
+        }
+      }
+
+      let createdUsers = 0;
+      let createdStudents = 0;
+      let skippedExisting = 0;
+      let rowErrors = [];
+
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line) continue;
+
+        const parts = line.split(",");
+        const name = (parts[idxName] || "").trim();
+        const email = (parts[idxEmail] || "").trim().toLowerCase();
+        const password = (parts[idxPassword] || "").trim();
+        const roleRaw =
+          idxRole !== -1 ? (parts[idxRole] || "").trim() : "";
+        const centerCode =
+          idxCenterCode !== -1 ? (parts[idxCenterCode] || "").trim() : "";
+        const grade =
+          idxGrade !== -1 ? (parts[idxGrade] || "").trim() : "";
+        const rollNumber =
+          idxRollNumber !== -1 ? (parts[idxRollNumber] || "").trim() : "";
+
+        const rowNumber = i + 1;
+
+        if (!name || !email || !password) {
+          rowErrors.push({
+            row: rowNumber,
+            email,
+            error: "missing_name_email_or_password",
+          });
+          continue;
         }
 
-        const csvRaw = req.file.buffer.toString("utf8");
-        const lines = csvRaw
-          .split(/\r?\n/)
-          .map((l) => l.trim())
-          .filter((l) => l.length > 0);
+        const role = roleRaw === "admin" ? "admin" : "student";
 
-        if (lines.length < 2) {
-          return res.status(400).json({ error: "csv_has_no_data_rows" });
-        }
+        try {
+          // 1) Check if user already exists
+          const [existing] = await db
+            .select()
+            .from(users)
+            .where(eq(users.email, email));
 
-        const header = lines[0].split(",").map((h) => h.trim());
-        const idx = (name) => header.indexOf(name);
-
-        const idxName = idx("name");
-        const idxEmail = idx("email");
-        const idxPassword = idx("password");
-        const idxRole = idx("role");
-        const idxCenterCode = idx("centerCode");
-        const idxGrade = idx("grade");
-        const idxRollNumber = idx("rollNumber");
-
-        const requiredCols = ["name", "email", "password"];
-        for (const col of requiredCols) {
-          if (idx(col) === -1) {
-            return res.status(400).json({
-              error: "missing_required_column",
-              column: col,
-            });
+          if (existing) {
+            skippedExisting++;
+            continue;
           }
-        }
 
-        let createdUsers = 0;
-        let createdStudents = 0;
-        let skippedExisting = 0;
-        let rowErrors = [];
+          // 2) Insert user
+          // TODO: use real hash later
+          const userInsertResult = await db.insert(users).values({
+            name,
+            email,
+            passwordHash: password,
+            role,
+          });
 
-        for (let i = 1; i < lines.length; i++) {
-          const line = lines[i];
-          if (!line) continue;
+          // 3) Re-fetch user by email (same pattern as /admin/students)
+          const [user] = await db
+            .select()
+            .from(users)
+            .where(eq(users.email, email));
 
-          const parts = line.split(",");
-          const name = (parts[idxName] || "").trim();
-          const email = (parts[idxEmail] || "").trim().toLowerCase();
-          const password = (parts[idxPassword] || "").trim();
-          const roleRaw =
-            idxRole !== -1 ? (parts[idxRole] || "").trim() : "";
-          const centerCode =
-            idxCenterCode !== -1 ? (parts[idxCenterCode] || "").trim() : "";
-          const grade =
-            idxGrade !== -1 ? (parts[idxGrade] || "").trim() : "";
-          const rollNumber =
-            idxRollNumber !== -1 ? (parts[idxRollNumber] || "").trim() : "";
-
-          const rowNumber = i + 1;
-
-          if (!name || !email || !password) {
+          if (!user) {
+            console.error("User not found after insert in import", {
+              rowNumber,
+              email,
+              userInsertResult,
+            });
             rowErrors.push({
               row: rowNumber,
               email,
-              error: "missing_name_email_or_password",
+              error: "user_creation_failed",
             });
             continue;
           }
 
-          const role = roleRaw === "admin" ? "admin" : "student";
+          createdUsers++;
 
-          try {
-            const [existing] = await db
-              .select()
-              .from(users)
-              .where(eq(users.email, email));
-
-            if (existing) {
-              skippedExisting++;
+          // 4) Only create student row for student role
+          if (role === "student") {
+            if (!centerCode) {
+              rowErrors.push({
+                row: rowNumber,
+                email,
+                error: "student_missing_centerCode",
+              });
               continue;
             }
 
-            const userInsert = await db.insert(users).values({
-              name,
-              email,
-              passwordHash: password,
-              role,
-            });
+            const [center] = await db
+              .select()
+              .from(centers)
+              .where(eq(centers.code, centerCode));
 
-            const userId = userInsert.insertId;
-            createdUsers++;
-
-            if (role === "student") {
-              if (!centerCode) {
-                rowErrors.push({
-                  row: rowNumber,
-                  email,
-                  error: "student_missing_centerCode",
-                });
-                continue;
-              }
-
-              const [center] = await db
-                .select()
-                .from(centers)
-                .where(eq(centers.code, centerCode));
-
-              if (!center) {
-                rowErrors.push({
-                  row: rowNumber,
-                  email,
-                  centerCode,
-                  error: "center_not_found",
-                });
-                continue;
-              }
-
-              await db.insert(students).values({
-                userId,
-                centerId: center.id,
-                grade: grade || null,
-                rollNumber: rollNumber || null,
+            if (!center) {
+              rowErrors.push({
+                row: rowNumber,
+                email,
+                centerCode,
+                error: "center_not_found",
               });
-
-              createdStudents++;
+              continue;
             }
-          } catch (err) {
-            console.error(`Error on CSV row ${rowNumber}`, err);
-            rowErrors.push({
-              row: rowNumber,
-              email,
-              error: "exception",
-              message: err.message || String(err),
-            });
-          }
-        }
 
-        res.json({
-          ok: true,
-          summary: {
-            createdUsers,
-            createdStudents,
-            skippedExisting,
-            rowsProcessed: lines.length - 1,
-            rowsWithErrors: rowErrors.length,
-          },
-          errors: rowErrors,
-        });
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "admin_students_import_failed" });
+            // 🔴 VERY IMPORTANT: use the correct property name here
+            // It must match your Drizzle schema (likely "userId")
+            await db.insert(students).values({
+              userId: user.id,             // <-- this must not be undefined
+              centerId: center.id,
+              grade: grade || null,
+              rollNumber: rollNumber || null,
+            });
+
+            createdStudents++;
+          }
+        } catch (err) {
+          console.error(`Error on CSV row ${rowNumber}`, err);
+          rowErrors.push({
+            row: rowNumber,
+            email,
+            error: "exception",
+            message: err.message || String(err),
+          });
+        }
       }
+
+      return res.json({
+        ok: true,
+        summary: {
+          createdUsers,
+          createdStudents,
+          skippedExisting,
+          rowsProcessed: lines.length - 1,
+          rowsWithErrors: rowErrors.length,
+        },
+        errors: rowErrors,
+      });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "admin_students_import_failed" });
     }
-  );
+  }
+);
 
   router.get(
     "/admin/attendance-report/export",
@@ -1613,8 +1673,8 @@ function haversine(lat1, lon1, lat2, lon2) {
   const a =
     Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(lat1)) *
-      Math.cos(toRad(lat2)) *
-      Math.sin(dLon / 2) ** 2;
+    Math.cos(toRad(lat2)) *
+    Math.sin(dLon / 2) ** 2;
 
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;

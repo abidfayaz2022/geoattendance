@@ -68,7 +68,7 @@ export default function AdminDashboard() {
   const [reportMeta, setReportMeta] = useState(null);
   const [reportLoading, setReportLoading] = useState(false);
   const [reportError, setReportError] = useState(null);
-  const [reportCsvLoading, setReportCsvLoading] = useState(false); // <─ NEW
+  const [reportCsvLoading, setReportCsvLoading] = useState(false);
 
   // ─────────────────────────────
   // NEW: Student management state
@@ -227,6 +227,30 @@ export default function AdminDashboard() {
     });
   }, [records, searchTerm, gradeFilter]);
 
+  // Debug summary: how many SKIPPED and check-out entries
+  const attendanceDebug = useMemo(() => {
+    let skipped = 0;
+    let withCheckout = 0;
+
+    records.forEach((r) => {
+      const status = (r.status || "").toString().toLowerCase();
+      if (status === "skipped") skipped++;
+      if (r.checkOutAt || r.checkOutTime) withCheckout++;
+    });
+
+    return { skipped, withCheckout };
+  }, [records]);
+
+  useEffect(() => {
+    if (!records.length) return;
+    console.log("[ADMIN] Attendance debug summary:", {
+      total: records.length,
+      skipped: attendanceDebug.skipped,
+      withCheckout: attendanceDebug.withCheckout,
+    });
+    console.log("[ADMIN] Raw attendance records sample:", records.slice(0, 10));
+  }, [records, attendanceDebug]);
+
   // ─────────────────────────────
   // Handlers: Attendance report
   // ─────────────────────────────
@@ -275,7 +299,6 @@ export default function AdminDashboard() {
       setReportRows(Array.isArray(json.rows) ? json.rows : []);
       setReportMeta(json.meta || null);
 
-      // if page changed, sync state
       if (pageOverride != null) {
         setReportFilters((prev) => ({ ...prev, page: pageOverride }));
       }
@@ -350,7 +373,7 @@ export default function AdminDashboard() {
     try {
       setStudentsExportLoading(true);
 
-      const centerId = reportFilters.centerId || ""; // reuse filter if you want
+      const centerId = reportFilters.centerId || "";
       const query = new URLSearchParams();
       if (centerId) query.set("centerId", centerId);
 
@@ -435,7 +458,6 @@ export default function AdminDashboard() {
         text: "Student created successfully.",
       });
 
-      // Clear form
       setStudentForm({
         name: "",
         email: "",
@@ -556,8 +578,11 @@ export default function AdminDashboard() {
         }, Errors: ${json.summary?.rowsWithErrors ?? 0}`,
         raw: json,
       });
+      console.log("[ADMIN] Students CSV import result:", {
+        summary: json.summary,
+        errors: json.errors,
+      });
 
-      // Clear file input
       setImportFile(null);
       e.target.reset?.();
     } catch (err) {
@@ -759,6 +784,15 @@ export default function AdminDashboard() {
             </div>
           </div>
 
+          {(attendanceDebug.skipped > 0 ||
+            attendanceDebug.withCheckout > 0) && (
+            <p className="text-xs text-muted-foreground">
+              Debug: {attendanceDebug.skipped} entries with status{" "}
+              <code>SKIPPED</code>, {attendanceDebug.withCheckout} entries with
+              checkout time.
+            </p>
+          )}
+
           <Card>
             {loading ? (
               <div className="py-10 text-center text-muted-foreground">
@@ -775,7 +809,8 @@ export default function AdminDashboard() {
                     <TableHead>Student Name</TableHead>
                     <TableHead>Grade</TableHead>
                     <TableHead>Date</TableHead>
-                    <TableHead>Time</TableHead>
+                    <TableHead>In</TableHead>
+                    <TableHead>Out</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Location</TableHead>
                   </TableRow>
@@ -784,7 +819,7 @@ export default function AdminDashboard() {
                   {filteredRecords.length === 0 ? (
                     <TableRow>
                       <TableCell
-                        colSpan={6}
+                        colSpan={7}
                         className="text-center py-8 text-muted-foreground"
                       >
                         No records found matching your filters.
@@ -792,17 +827,29 @@ export default function AdminDashboard() {
                     </TableRow>
                   ) : (
                     filteredRecords.map((record) => {
-                      const dateObj = record.date
+                      const checkInDate = record.checkInAt
+                        ? new Date(record.checkInAt)
+                        : record.date
                         ? new Date(record.date)
                         : null;
 
-                      const dateStr = dateObj
-                        ? format(dateObj, "MMM dd, yyyy")
+                      const checkOutDate = record.checkOutAt
+                        ? new Date(record.checkOutAt)
+                        : record.checkOutTime
+                        ? new Date(record.checkOutTime)
+                        : null;
+
+                      const dateStr = checkInDate
+                        ? format(checkInDate, "MMM dd, yyyy")
                         : "—";
 
-                      const timeStr = dateObj
-                        ? format(dateObj, "hh:mm a")
-                        : record.time || "—";
+                      const checkInStr = checkInDate
+                        ? format(checkInDate, "hh:mm a")
+                        : "—";
+
+                      const checkOutStr = checkOutDate
+                        ? format(checkOutDate, "hh:mm a")
+                        : "—";
 
                       return (
                         <TableRow key={record.id}>
@@ -823,7 +870,8 @@ export default function AdminDashboard() {
                             </Badge>
                           </TableCell>
                           <TableCell>{dateStr}</TableCell>
-                          <TableCell>{timeStr}</TableCell>
+                          <TableCell>{checkInStr}</TableCell>
+                          <TableCell>{checkOutStr}</TableCell>
                           <TableCell>
                             <Badge className="bg-green-100 text-green-700 hover:bg-green-100 border-green-200 shadow-none">
                               {(record.status || "")
@@ -832,11 +880,38 @@ export default function AdminDashboard() {
                             </Badge>
                           </TableCell>
                           <TableCell>
-                            {record.location ? (
-                              <div className="flex items-center text-xs text-muted-foreground">
-                                <MapPin className="w-3 h-3 mr-1" />
-                                {Number(record.location.lat).toFixed(4)},{" "}
-                                {Number(record.location.lng).toFixed(4)}
+                            {record.location || record.checkOutLocation ? (
+                              <div className="flex flex-col text-xs text-muted-foreground">
+                                {record.location && (
+                                  <div className="flex items-center">
+                                    <MapPin className="w-3 h-3 mr-1" />
+                                    <span>
+                                      IN:{" "}
+                                      {Number(
+                                        record.location.lat
+                                      ).toFixed(4)}
+                                      ,{" "}
+                                      {Number(
+                                        record.location.lng
+                                      ).toFixed(4)}
+                                    </span>
+                                  </div>
+                                )}
+                                {record.checkOutLocation && (
+                                  <div className="flex items-center mt-0.5">
+                                    <MapPin className="w-3 h-3 mr-1" />
+                                    <span>
+                                      OUT:{" "}
+                                      {Number(
+                                        record.checkOutLocation.lat
+                                      ).toFixed(4)}
+                                      ,{" "}
+                                      {Number(
+                                        record.checkOutLocation.lng
+                                      ).toFixed(4)}
+                                    </span>
+                                  </div>
+                                )}
                               </div>
                             ) : (
                               <span className="text-xs text-muted-foreground">
@@ -971,8 +1046,8 @@ export default function AdminDashboard() {
               {reportMeta && (
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
                   <span>
-                    Showing {reportRows.length} of {reportMeta.total} records{" "}
-                    (page {reportMeta.page} / {reportMeta.totalPages || 1})
+                    Showing {reportRows.length} of {reportMeta.total} records (
+                    page {reportMeta.page} / {reportMeta.totalPages || 1})
                   </span>
                   <div className="flex gap-2">
                     <Button
@@ -1299,9 +1374,7 @@ export default function AdminDashboard() {
               <CardContent className="p-4 space-y-3">
                 <div className="flex items-center gap-2">
                   <Compass className="w-4 h-4 text-slate-700" />
-                  <h3 className="text-sm font-semibold">
-                    Center Geofence
-                  </h3>
+                  <h3 className="text-sm font-semibold">Center Geofence</h3>
                 </div>
                 <p className="text-[11px] text-muted-foreground">
                   Update latitude, longitude and allowed radius (meters) for a
@@ -1364,9 +1437,7 @@ export default function AdminDashboard() {
                     className="w-full"
                     disabled={centerUpdateLoading}
                   >
-                    {centerUpdateLoading
-                      ? "Updating…"
-                      : "Update Center Location"}
+                    {centerUpdateLoading ? "Updating…" : "Update Center Location"}
                   </Button>
                   {centerUpdateMessage && (
                     <p
