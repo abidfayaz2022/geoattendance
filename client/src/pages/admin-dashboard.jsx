@@ -33,6 +33,7 @@ import {
   Trash2,
   Compass,
   BarChart2,
+  QrCode, // 👈 NEW
 } from "lucide-react";
 import { format } from "date-fns";
 import { buildUrl } from "@/lib/queryClient";
@@ -108,6 +109,11 @@ export default function AdminDashboard() {
   });
   const [centerUpdateLoading, setCenterUpdateLoading] = useState(false);
   const [centerUpdateMessage, setCenterUpdateMessage] = useState(null);
+
+  // ─────────────────────────────
+  // NEW: QR cards download state
+  // ─────────────────────────────
+  const [qrCardsLoading, setQrCardsLoading] = useState(false);
 
   // ─────────────────────────────
   // NEW: helper for header-based auth
@@ -406,6 +412,46 @@ export default function AdminDashboard() {
       alert("Failed to export students CSV.");
     } finally {
       setStudentsExportLoading(false);
+    }
+  }
+
+  // ─────────────────────────────
+  // NEW: Handlers: Download QR cards PDF
+  // ─────────────────────────────
+  async function handleDownloadQrCards() {
+    if (!user) return;
+
+    try {
+      setQrCardsLoading(true);
+
+      const authHeaders = getAuthHeaders();
+
+      const res = await fetch(buildUrl("/admin/students/qr-cards"), {
+        credentials: "include",
+        headers: {
+          ...authHeaders,
+        },
+      });
+
+      if (!res.ok) {
+        const text = (await res.text()) || res.statusText;
+        throw new Error(text);
+      }
+
+      const blob = await res.blob();
+      const href = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = href;
+      a.download = "student_qr_cards.pdf";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(href);
+    } catch (err) {
+      console.error("Failed to download QR cards:", err);
+      alert("Failed to download QR cards PDF. Please try again.");
+    } finally {
+      setQrCardsLoading(false);
     }
   }
 
@@ -1168,18 +1214,29 @@ export default function AdminDashboard() {
                     <FileDown className="w-4 h-4 text-slate-700" />
                     Student Data
                   </h3>
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    onClick={handleExportStudents}
-                    disabled={studentsExportLoading}
-                  >
-                    {studentsExportLoading ? "Exporting…" : "Export CSV"}
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      onClick={handleExportStudents}
+                      disabled={studentsExportLoading}
+                    >
+                      {studentsExportLoading ? "Exporting…" : "Export CSV"}
+                    </Button>
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      onClick={handleDownloadQrCards}
+                      disabled={qrCardsLoading}
+                    >
+                      <QrCode className="w-3 h-3 mr-1" />
+                      {qrCardsLoading ? "Generating…" : "QR Cards PDF"}
+                    </Button>
+                  </div>
                 </div>
                 <p className="text-[11px] text-muted-foreground">
                   Export all students (or filtered by centerId) with their
-                  hashed passwords.
+                  hashed passwords, or download printable QR cards PDF.
                 </p>
 
                 <form

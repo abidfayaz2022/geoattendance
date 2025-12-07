@@ -9,7 +9,8 @@ import {
   attendanceRecords,
 } from "../shared/schema.js";
 import multer from "multer";
-import { check } from "drizzle-orm/mysql-core";
+import PDFDocument from "pdfkit";
+import QRCode from "qrcode";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -219,362 +220,7 @@ export function createRouter() {
   // STUDENT APIs (protected)
   // ─────────────────────────
 
-  /**
-   * POST /student/attendance/check-in
-   *
-   * Body: {
-   *   lat: number,
-   *   lng: number,
-   *   accuracy?: number,
-   *   deviceId?: string
-   * }
-   *
-   * Uses req.user.id as the student userId.
-   */
-  router.post(
-    "/student/attendance/check-in",
-    simpleAuth,
-    requireRole("student"),
-    async (req, res) => {
-      try {
-        const { lat, lng, accuracy, deviceId } = req.body || {};
-
-        if (
-          lat == null ||
-          lng == null ||
-          Number.isNaN(Number(lat)) ||
-          Number.isNaN(Number(lng))
-        ) {
-          return res.status(400).json({ error: "missing_check_in_data" });
-        }
-
-        const studentUserId = Number(req.user.id);
-
-        // who is checking in? (student linked by userId)
-        const [student] = await db
-          .select()
-          .from(students)
-          .where(eq(students.userId, studentUserId));
-
-        if (!student) {
-          return res.status(404).json({ error: "student_not_found" });
-        }
-
-        // which center?
-        const [center] = await db
-          .select()
-          .from(centers)
-          .where(eq(centers.id, student.centerId));
-
-        if (!center) {
-          return res.status(404).json({ error: "center_not_found" });
-        }
-
-        if (
-          center.lat == null ||
-          center.lng == null ||
-          center.radiusMeters == null
-        ) {
-          return res
-            .status(400)
-            .json({ error: "center_geofence_not_configured" });
-        }
-
-        // ---- Prevent multiple check-ins per day
-        const now = new Date();
-        const todayStart = new Date(
-          Date.UTC(
-            now.getUTCFullYear(),
-            now.getUTCMonth(),
-            now.getUTCDate(),
-            0,
-            0,
-            0
-          )
-        );
-        const tomorrowStart = new Date(todayStart);
-        tomorrowStart.setUTCDate(todayStart.getUTCDate() + 1);
-
-        const [existingToday] = await db
-          .select({ id: attendanceRecords.id })
-          .from(attendanceRecords)
-          .where(
-            and(
-              eq(attendanceRecords.studentId, student.id),
-              gte(attendanceRecords.checkInAt, todayStart),
-              lt(attendanceRecords.checkInAt, tomorrowStart)
-            )
-          );
-
-        if (existingToday) {
-          return res.status(409).json({
-            error: "already_checked_in",
-            message: "You have already marked attendance for today.",
-          });
-        }
-
-        // Check distance from center
-        const distanceMeters = haversine(
-          Number(center.lat),
-          Number(center.lng),
-          Number(lat),
-          Number(lng)
-        );
-
-        const withinRadius = distanceMeters <= Number(center.radiusMeters);
-
-        if (!withinRadius) {
-          return res.status(403).json({
-            error: "outside_geofence",
-            distanceMeters,
-            radiusMeters: center.radiusMeters,
-            allowed: false,
-          });
-        }
-
-        const ipAddress = req.ip || req.headers["x-forwarded-for"] || null;
-        const userAgent = req.headers["user-agent"] || null;
-
-        const insertResult = await db.insert(attendanceRecords).values({
-          studentId: student.id,
-          centerId: center.id,
-          checkInAt: now,
-          status: "present",
-          checkInLat: Number(lat),
-          checkInLng: Number(lng),
-          checkInAccuracy: accuracy != null ? Number(accuracy) : null,
-          distanceFromCenterMeters: distanceMeters,
-          deviceId: deviceId || null,
-          ipAddress,
-          userAgent,
-        });
-
-        const newId = insertResult.insertId;
-
-        let [record] = await db
-          .select()
-          .from(attendanceRecords)
-          .where(eq(attendanceRecords.id, newId));
-
-        if (!record) {
-          record = {
-            id: newId,
-            studentId: student.id,
-            centerId: center.id,
-            checkInAt: now,
-            status: "present",
-            checkInLat: Number(lat),
-            checkInLng: Number(lng),
-            checkInAccuracy: accuracy != null ? Number(accuracy) : null,
-            distanceFromCenterMeters: distanceMeters,
-            deviceId: deviceId || null,
-            ipAddress,
-            userAgent,
-          };
-        }
-
-        res.json({
-          ok: true,
-          record,
-          distanceMeters,
-        });
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "student_check_in_failed" });
-      }
-    }
-  );
-
-  /**
-   * POST /student/attendance/check-out
-   */
-  router.post(
-    "/student/attendance/check-out",
-    simpleAuth,
-    requireRole("student"),
-    async (req, res) => {
-      try {
-        const { lat, lng, accuracy, deviceId } = req.body || {};
-
-        if (
-          lat == null ||
-          lng == null ||
-          Number.isNaN(Number(lat)) ||
-          Number.isNaN(Number(lng))
-        ) {
-          return res.status(400).json({ error: "missing_checkout_data" });
-        }
-
-        const studentUserId = Number(req.user.id);
-
-        // resolve student
-        const [student] = await db
-          .select()
-          .from(students)
-          .where(eq(students.userId, studentUserId));
-
-        if (!student) {
-          return res.status(404).json({ error: "student_not_found" });
-        }
-
-        const [center] = await db
-          .select()
-          .from(centers)
-          .where(eq(centers.id, student.centerId));
-
-        if (!center) {
-          return res.status(404).json({ error: "center_not_found" });
-        }
-
-        if (
-          center.lat == null ||
-          center.lng == null ||
-          center.radiusMeters == null
-        ) {
-          return res
-            .status(400)
-            .json({ error: "center_geofence_not_configured" });
-        }
-
-        const now = new Date();
-        const todayStart = new Date(
-          Date.UTC(
-            now.getUTCFullYear(),
-            now.getUTCMonth(),
-            now.getUTCDate(),
-            0,
-            0,
-            0
-          )
-        );
-        const tomorrowStart = new Date(todayStart);
-        tomorrowStart.setUTCDate(todayStart.getUTCDate() + 1);
-
-        const [openRecord] = await db
-          .select()
-          .from(attendanceRecords)
-          .where(
-            and(
-              eq(attendanceRecords.studentId, student.id),
-              gte(attendanceRecords.checkInAt, todayStart),
-              lt(attendanceRecords.checkInAt, tomorrowStart),
-              sql`${attendanceRecords.checkOutAt} IS NULL`
-            )
-          )
-          .orderBy(desc(attendanceRecords.checkInAt));
-
-        if (!openRecord) {
-          return res.status(409).json({
-            error: "no_open_session",
-            message: "No open attendance record found for today.",
-          });
-        }
-
-        const distanceMeters = haversine(
-          Number(center.lat),
-          Number(center.lng),
-          Number(lat),
-          Number(lng)
-        );
-        const withinRadius = distanceMeters <= Number(center.radiusMeters);
-
-        if (!withinRadius) {
-          return res.status(403).json({
-            error: "outside_geofence",
-            distanceMeters,
-            radiusMeters: center.radiusMeters,
-            allowed: false,
-          });
-        }
-
-        const ipAddress = req.ip || req.headers["x-forwarded-for"] || null;
-        const userAgent = req.headers["user-agent"] || null;
-
-        await db
-          .update(attendanceRecords)
-          .set({
-            checkOutAt: now,
-            checkOutLat: Number(lat),
-            checkOutLng: Number(lng),
-            checkOutAccuracy: accuracy != null ? Number(accuracy) : null,
-            distanceFromCenterCheckoutMeters: distanceMeters,
-            deviceId: deviceId || openRecord.deviceId || null,
-            ipAddress: ipAddress || openRecord.ipAddress || null,
-            userAgent: userAgent || openRecord.userAgent || null,
-          })
-          .where(eq(attendanceRecords.id, openRecord.id));
-
-        const [updated] = await db
-          .select()
-          .from(attendanceRecords)
-          .where(eq(attendanceRecords.id, openRecord.id));
-
-        res.json({
-          ok: true,
-          record: updated || null,
-          distanceMeters,
-        });
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "student_check_out_failed" });
-      }
-    }
-  );
-
-  /**
-   * GET /student/geofence
-   * Uses req.user.id, no query param needed.
-   */
-  router.get(
-    "/student/geofence",
-    simpleAuth,
-    requireRole("student"),
-    async (req, res) => {
-      try {
-        const studentUserId = Number(req.user.id);
-
-        const [student] = await db
-          .select()
-          .from(students)
-          .where(eq(students.userId, studentUserId));
-
-        if (!student) {
-          return res.status(404).json({ error: "student_not_found" });
-        }
-
-        const [center] = await db
-          .select()
-          .from(centers)
-          .where(eq(centers.id, student.centerId));
-
-        if (!center) {
-          return res.status(404).json({ error: "center_not_found" });
-        }
-
-        if (
-          center.lat == null ||
-          center.lng == null ||
-          center.radiusMeters == null
-        ) {
-          return res
-            .status(400)
-            .json({ error: "center_geofence_not_configured" });
-        }
-
-        res.json({
-          centerId: center.id,
-          centerName: center.name,
-          centerLat: Number(center.lat),
-          centerLng: Number(center.lng),
-          radiusMeters: Number(center.radiusMeters),
-        });
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "student_geofence_failed" });
-      }
-    }
-  );
-
+ 
   /**
    * GET /student/attendance-history
    */
@@ -1017,6 +663,173 @@ export function createRouter() {
     }
   );
 
+
+    /**
+   * POST /admin/attendance/scan
+   *
+   * Body: { studentId, centerId?, deviceId? }
+   *
+   * Logic:
+   *  - If student has an open session (today, center, checkOutAt IS NULL) → CHECK-OUT
+   *  - Else → CHECK-IN
+   *
+   * Response:
+   *  { ok: true, action: "check_in" | "check_out", record: {...} }
+   */
+  router.post(
+    "/admin/attendance/scan",
+    simpleAuth,
+    requireRole("admin"),
+    async (req, res) => {
+      try {
+        const { studentId: rawStudentId, centerId: rawCenterId, deviceId } =
+          req.body || {};
+
+        const studentId = Number(rawStudentId);
+        const centerId = rawCenterId != null ? Number(rawCenterId) : null;
+
+        if (!studentId || Number.isNaN(studentId)) {
+          return res.status(400).json({ error: "invalid_student_id" });
+        }
+
+        // 1) Find student
+        const [student] = await db
+          .select()
+          .from(students)
+          .where(eq(students.id, studentId));
+
+        if (!student) {
+          return res.status(404).json({ error: "student_not_found" });
+        }
+
+        // Decide centerId: prefer explicit, fallback to student's center
+        const effectiveCenterId = centerId || student.centerId;
+
+        // 2) Validate center
+        const [center] = await db
+          .select()
+          .from(centers)
+          .where(eq(centers.id, effectiveCenterId));
+
+        if (!center) {
+          return res.status(400).json({ error: "center_not_found" });
+        }
+
+        // 3) Build "today" window in UTC
+        const now = new Date();
+        const todayStart = new Date(
+          Date.UTC(
+            now.getUTCFullYear(),
+            now.getUTCMonth(),
+            now.getUTCDate(),
+            0,
+            0,
+            0
+          )
+        );
+        const tomorrowStart = new Date(todayStart);
+        tomorrowStart.setUTCDate(todayStart.getUTCDate() + 1);
+
+        // 4) Look for an open session (today, center, no checkout)
+        const [openRecord] = await db
+          .select()
+          .from(attendanceRecords)
+          .where(
+            and(
+              eq(attendanceRecords.studentId, studentId),
+              eq(attendanceRecords.centerId, effectiveCenterId),
+              gte(attendanceRecords.checkInAt, todayStart),
+              lt(attendanceRecords.checkInAt, tomorrowStart),
+              sql`check_out_at IS NULL`
+            )
+          )
+          .orderBy(desc(attendanceRecords.checkInAt));
+
+        const ipAddress =
+          req.headers["x-forwarded-for"]?.toString().split(",")[0] ||
+          req.ip ||
+          null;
+        const userAgent = req.headers["user-agent"] || null;
+
+        // 5A) If open session exists → CHECK-OUT
+        if (openRecord) {
+          await db
+            .update(attendanceRecords)
+            .set({
+              checkOutAt: now,
+              // Optionally override / keep device + audit info
+              deviceId: deviceId || openRecord.deviceId || null,
+              ipAddress: ipAddress || openRecord.ipAddress || null,
+              userAgent: userAgent || openRecord.userAgent || null,
+            })
+            .where(eq(attendanceRecords.id, openRecord.id));
+
+          const [updated] = await db
+            .select()
+            .from(attendanceRecords)
+            .where(eq(attendanceRecords.id, openRecord.id));
+
+          return res.json({
+            ok: true,
+            action: "check_out",
+            record: updated,
+          });
+        }
+
+        // 5B) No open session → CHECK-IN
+        const insertResult = await db.insert(attendanceRecords).values({
+          studentId,
+          centerId: effectiveCenterId,
+          checkInAt: now,
+          status: "present",
+
+          checkInLat: null,
+          checkInLng: null,
+          checkInAccuracy: null,
+          distanceFromCenterMeters: null,
+
+          checkOutAt: null,
+          checkOutLat: null,
+          checkOutLng: null,
+          checkOutAccuracy: null,
+          distanceFromCenterCheckoutMeters: null,
+
+          deviceId: deviceId || null,
+          ipAddress,
+          userAgent,
+        });
+
+        const insertedId =
+          insertResult?.insertId ??
+          insertResult?.[0]?.insertId ??
+          null;
+
+        const [newRecord] = await db
+          .select()
+          .from(attendanceRecords)
+          .where(
+            insertedId
+              ? eq(attendanceRecords.id, insertedId)
+              : and(
+                  eq(attendanceRecords.studentId, studentId),
+                  eq(attendanceRecords.centerId, effectiveCenterId),
+                  eq(attendanceRecords.checkInAt, now)
+                )
+          );
+
+        return res.status(201).json({
+          ok: true,
+          action: "check_in",
+          record: newRecord,
+        });
+      } catch (err) {
+        console.error("admin_scan_attendance_failed:", err);
+        return res.status(500).json({ error: "admin_scan_attendance_failed" });
+      }
+    }
+  );
+
+
   router.get(
     "/admin/stats",
     simpleAuth,
@@ -1269,61 +1082,7 @@ export function createRouter() {
     }
   );
 
-  router.patch(
-    "/admin/centers/:centerId/location",
-    simpleAuth,
-    requireRole("admin"),
-    async (req, res) => {
-      try {
-        const centerId = Number(req.params.centerId);
-        const { lat, lng, radiusMeters } = req.body || {};
-
-        if (
-          !centerId ||
-          lat == null ||
-          lng == null ||
-          radiusMeters == null ||
-          Number.isNaN(Number(lat)) ||
-          Number.isNaN(Number(lng)) ||
-          Number.isNaN(Number(radiusMeters))
-        ) {
-          return res.status(400).json({ error: "invalid_payload" });
-        }
-
-        if (Number(radiusMeters) <= 0) {
-          return res.status(400).json({ error: "radius_must_be_positive" });
-        }
-
-        const [center] = await db
-          .select()
-          .from(centers)
-          .where(eq(centers.id, centerId));
-
-        if (!center) {
-          return res.status(404).json({ error: "center_not_found" });
-        }
-
-        await db
-          .update(centers)
-          .set({
-            lat: Number(lat),
-            lng: Number(lng),
-            radiusMeters: Number(radiusMeters),
-          })
-          .where(eq(centers.id, centerId));
-
-        const [updated] = await db
-          .select()
-          .from(centers)
-          .where(eq(centers.id, centerId));
-
-        res.json({ ok: true, center: updated || null });
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "admin_update_center_location_failed" });
-      }
-    }
-  );
+ 
 
   router.post(
   "/admin/students/import",
@@ -1657,25 +1416,164 @@ export function createRouter() {
     }
   );
 
+    /**
+   * GET /admin/students/qr-cards
+   *
+   * Generates a PDF with QR cards for all students.
+   * Each card contains:
+   *  - Student name
+   *  - Center code
+   *  - Student ID
+   *  - QR code (payload = studentId)
+   *
+   * Auth:
+   *  - x-user-id (admin)
+   *  - x-user-password
+   */
+  router.get(
+    "/admin/students/qr-cards",
+    simpleAuth,
+    requireRole("admin"),
+    async (req, res) => {
+      try {
+        // 1) Fetch all students + user + center
+        const rows = await db
+          .select({
+            studentId: students.id,
+            userId: users.id,
+            studentName: users.name,
+            studentEmail: users.email,
+            rollNumber: students.rollNumber,
+            grade: students.grade,
+            centerId: centers.id,
+            centerName: centers.name,
+            centerCode: centers.code,
+          })
+          .from(students)
+          .leftJoin(users, eq(students.userId, users.id))
+          .leftJoin(centers, eq(students.centerId, centers.id))
+          .orderBy(centers.code, users.name);
+
+        if (!rows.length) {
+          return res.status(404).json({ error: "no_students_found" });
+        }
+
+        // 2) Prepare PDF response headers
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader(
+          "Content-Disposition",
+          'attachment; filename="student_qr_cards.pdf"'
+        );
+
+        const doc = new PDFDocument({
+          size: "A4",
+          margin: 36,
+        });
+
+        doc.pipe(res);
+
+        // Layout config (tweak as you like)
+        const cardWidth = 260;
+        const cardHeight = 150;
+        const cols = 2;       // 2 cards per row
+        const rowsPerPage = 4; // 4 rows per page → 8 cards / page
+
+        let colIndex = 0;
+        let rowIndex = 0;
+
+        for (const s of rows) {
+          // New page if filled current one
+          if (rowIndex >= rowsPerPage) {
+            doc.addPage();
+            rowIndex = 0;
+            colIndex = 0;
+          }
+
+          const x =
+            doc.page.margins.left + colIndex * cardWidth;
+          const y =
+            doc.page.margins.top + rowIndex * cardHeight;
+
+          // Card border
+          doc
+            .roundedRect(
+              x,
+              y,
+              cardWidth - 10,
+              cardHeight - 10,
+              10
+            )
+            .stroke();
+
+          // Header: Center name & code
+          doc.fontSize(10).text(
+            s.centerName || "",
+            x + 12,
+            y + 10,
+            { width: cardWidth - 120, ellipsis: true }
+          );
+          doc
+            .fontSize(9)
+            .fillColor("#555555")
+            .text(
+              `Center: ${s.centerCode || ""}`,
+              x + 12,
+              y + 26
+            )
+            .fillColor("black");
+
+          // Student name
+          doc
+            .fontSize(12)
+            .font("Helvetica-Bold")
+            .text(
+              s.studentName || "Unnamed Student",
+              x + 12,
+              y + 48,
+              { width: cardWidth - 120, ellipsis: true }
+            )
+            .font("Helvetica");
+
+          // ID & other info
+          doc
+            .fontSize(9)
+            .text(`Student ID: ${s.studentId}`, x + 12, y + 72)
+            .text(`Roll: ${s.rollNumber || "-"}`, x + 12, y + 86)
+            .text(`Grade: ${s.grade || "-"}`, x + 12, y + 100);
+
+          // 3) Generate QR for this student (payload = studentId)
+          const qrPayload = String(s.studentId);
+          const qrBuffer = await QRCode.toBuffer(qrPayload, {
+            width: 100,
+            margin: 1,
+          });
+
+          // Place QR on right side of card
+          doc.image(qrBuffer, x + cardWidth - 120, y + 40, {
+            width: 90,
+            height: 90,
+          });
+
+          // Move layout cursor
+          colIndex++;
+          if (colIndex >= cols) {
+            colIndex = 0;
+            rowIndex++;
+          }
+        }
+
+        doc.end();
+      } catch (err) {
+        console.error("admin_qr_cards_failed:", err);
+        if (!res.headersSent) {
+          res.status(500).json({ error: "admin_qr_cards_failed" });
+        }
+      }
+    }
+  );
+
+
   return router;
 }
 
-// ─────────────────────────────
-// Haversine distance helper
-// ─────────────────────────────
-function haversine(lat1, lon1, lat2, lon2) {
-  const R = 6371_000; // meters
-  const toRad = (deg) => (deg * Math.PI) / 180;
 
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) *
-    Math.cos(toRad(lat2)) *
-    Math.sin(dLon / 2) ** 2;
-
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
