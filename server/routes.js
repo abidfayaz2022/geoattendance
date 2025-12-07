@@ -797,7 +797,7 @@ router.post(
         lastActionAt &&
         now.getTime() - new Date(lastActionAt).getTime() < MIN_GAP_MS
       ) {
-        return res.status(400).json({
+        return res.status(402).json({
           error: "too_soon",
           message:
             "Please wait at least one minute between attendance scans to avoid accidental check-ins/check-outs.",
@@ -808,7 +808,7 @@ router.post(
       // If there is NO open session and the student already has 2 sessions today,
       // do not allow creating a new one.
       if (!openRecord && totalSessionsToday >= 2) {
-        return res.status(400).json({
+        return res.status(406).json({
           error: "daily_limit_reached",
           message:
             "Maximum number of attendance sessions for today has been reached for this student.",
