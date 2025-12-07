@@ -1,4 +1,7 @@
 // server/index.js
+// Set server timezone to India (IST)
+process.env.TZ = "Asia/Kolkata";
+
 import express from "express";
 import cors from "cors";
 import morgan from "morgan";
@@ -21,9 +24,9 @@ app.use(
         "http://localhost:5000",
         "http://127.0.0.1:5000",
         "https://wcrv93pn-5000.inc1.devtunnels.ms",
-        "https://geoattendance-delta.vercel.app"
+        "https://geoattendance-delta.vercel.app",
       ];
-      
+
       // Allow all localhost ports
       if (!origin || origin.match(/^https?:\/\/(localhost|127\.0\.0\.1):\d+$/)) {
         callback(null, true);
@@ -51,9 +54,9 @@ serveStaticAssets(app, {
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, uptime: process.uptime() });
+  res.json({ ok: true, uptime: process.uptime(), timezone: process.env.TZ });
 });
 
 app.listen(PORT, () => {
-  console.log(`Server listening on http://localhost:${PORT}`);
+  console.log(`Server listening on http://localhost:${PORT} (TZ=${process.env.TZ})`);
 });
