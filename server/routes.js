@@ -24,7 +24,7 @@ const upload = multer({
 // ─────────────────────────
 
 /**
- * Parse a YYYY-MM-DD string as a local Date (midnight).
+ * Parse a YYYY-MM-DD string as a local Date (midnight, local time).
  * Returns null if invalid.
  */
 function parseLocalDateOnly(yyyyMmDd) {
@@ -45,6 +45,39 @@ function getLocalDayRange(dateLike) {
   const end = new Date(start);
   end.setDate(start.getDate() + 1);
   return { start, end };
+}
+
+/**
+ * Format any Date-like as an IST string "YYYY-MM-DD HH:mm:ss"
+ * (Asia/Kolkata, 24-hour clock).
+ */
+function formatISTDateTime(dt) {
+  if (!dt) return null;
+  const d = dt instanceof Date ? dt : new Date(dt);
+  if (Number.isNaN(d.getTime())) return null;
+
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(d);
+
+  const get = (type) =>
+    parts.find((p) => p.type === type)?.value || "";
+
+  const y = get("year");
+  const m = get("month");
+  const day = get("day");
+  const hh = get("hour");
+  const mm = get("minute");
+  const ss = get("second");
+
+  return `${y}-${m}-${day} ${hh}:${mm}:${ss}`;
 }
 
 // ─────────────────────────
@@ -113,14 +146,17 @@ function requireRole(role) {
 export function createRouter() {
   const router = express.Router();
 
-router.get("/health", (_req, res) => {
-  res.json({
-    ok: true,
-    uptime: process.uptime(),
-    timezone: process.env.TZ || "not_set",
-    now: new Date(),          // this should now be IST when stringified
+  // Simple health inside /api
+  router.get("/health", (_req, res) => {
+    const now = new Date();
+    res.json({
+      ok: true,
+      uptime: process.uptime(),
+      timezoneEnv: process.env.TZ || "not_set",
+      nowUTC: now.toISOString(),
+      nowIST: formatISTDateTime(now),
+    });
   });
-});
 
   // ─────────────────────────
   // Auth (SUPER SIMPLE)
@@ -292,8 +328,8 @@ router.get("/health", (_req, res) => {
 
         const mapped = rows.map((r) => ({
           id: r.id,
-          date: r.date,
-          time: r.date ? r.date.toISOString() : null,
+          date: r.date, // raw Date from DB (UTC under the hood)
+          time: r.date ? formatISTDateTime(r.date) : null, // IST string
           status: r.status || "present",
           location:
             r.checkInLat != null && r.checkInLng != null
@@ -402,17 +438,7 @@ router.get("/health", (_req, res) => {
 
         const lines = [header.join(",")];
 
-        const formatLocal = (dt) => {
-          if (!dt) return "";
-          const d = new Date(dt);
-          const y = d.getFullYear();
-          const m = String(d.getMonth() + 1).padStart(2, "0");
-          const day = String(d.getDate()).padStart(2, "0");
-          const hh = String(d.getHours()).padStart(2, "0");
-          const mm = String(d.getMinutes()).padStart(2, "0");
-          const ss = String(d.getSeconds()).padStart(2, "0");
-          return `${y}-${m}-${day} ${hh}:${mm}:${ss}`;
-        };
+        const formatLocal = (dt) => formatISTDateTime(dt) || "";
 
         for (const r of rows) {
           const row = [
@@ -766,7 +792,7 @@ router.get("/health", (_req, res) => {
           return res.status(400).json({ error: "center_not_found" });
         }
 
-        // 3) Build "today" window in local time (IST)
+        // 3) Build "today" window in local time (IST, assuming TZ configured)
         const now = new Date();
         const todayStart = new Date(
           now.getFullYear(),
@@ -1031,11 +1057,11 @@ router.get("/health", (_req, res) => {
           userName: r.userName || "Unknown",
           userGrade: r.studentGrade || "N/A",
           date: r.date,
-          time: r.date != null ? r.date.toISOString() : null,
+          time: r.date != null ? formatISTDateTime(r.date) : null,
           status: r.status || "present",
           checkOutAt: r.checkOutAt,
           checkOutTime:
-            r.checkOutAt != null ? r.checkOutAt.toISOString() : null,
+            r.checkOutAt != null ? formatISTDateTime(r.checkOutAt) : null,
           checkInAt: r.date,
           location:
             r.checkInLat != null && r.checkInLng != null
@@ -1486,17 +1512,10 @@ router.get("/health", (_req, res) => {
 
         const formatLocalDate = (dt) => {
           if (!dt) return { dateStr: "", timeStr: "" };
-          const d = new Date(dt);
-          const y = d.getFullYear();
-          const m = String(d.getMonth() + 1).padStart(2, "0");
-          const day = String(d.getDate()).padStart(2, "0");
-          const hh = String(d.getHours()).padStart(2, "0");
-          const mm = String(d.getMinutes()).padStart(2, "0");
-          const ss = String(d.getSeconds()).padStart(2, "0");
-          return {
-            dateStr: `${y}-${m}-${day}`,
-            timeStr: `${hh}:${mm}:${ss}`,
-          };
+          const full = formatISTDateTime(dt);
+          if (!full) return { dateStr: "", timeStr: "" };
+          const [dateStr, timeStr] = full.split(" ");
+          return { dateStr: dateStr || "", timeStr: timeStr || "" };
         };
 
         for (const r of rows) {
