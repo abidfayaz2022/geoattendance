@@ -982,7 +982,7 @@ router.post(
           .leftJoin(students, eq(attendanceRecords.studentId, students.id))
           .leftJoin(users, eq(students.userId, users.id))
           .orderBy(desc(attendanceRecords.checkInAt))
-          .limit(200);
+          .limit(20);
 
         const mapped = rows.map((r) => ({
           id: r.id,
