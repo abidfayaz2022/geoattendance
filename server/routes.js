@@ -664,170 +664,240 @@ export function createRouter() {
   );
 
 
-    /**
-   * POST /admin/attendance/scan
-   *
-   * Body: { studentId, centerId?, deviceId? }
-   *
-   * Logic:
-   *  - If student has an open session (today, center, checkOutAt IS NULL) → CHECK-OUT
-   *  - Else → CHECK-IN
-   *
-   * Response:
-   *  { ok: true, action: "check_in" | "check_out", record: {...} }
-   */
-  router.post(
-    "/admin/attendance/scan",
-    simpleAuth,
-    requireRole("admin"),
-    async (req, res) => {
-      try {
-        const { studentId: rawStudentId, centerId: rawCenterId, deviceId } =
-          req.body || {};
+/**
+ * POST /admin/attendance/scan
+ *
+ * Body: { studentId, centerId?, deviceId? }
+ *
+ * Logic:
+ *  - If student has an open session (today, center, checkOutAt IS NULL) → CHECK-OUT
+ *  - Else → CHECK-IN
+ *
+ * Additional constraints:
+ *  - Max 2 sessions (check-in/out pairs) per student per center per day
+ *  - Minimum 1-minute gap between consecutive actions
+ *
+ * Response:
+ *  { ok: true, action: "check_in" | "check_out", record: {...} }
+ */
+router.post(
+  "/admin/attendance/scan",
+  simpleAuth,
+  requireRole("admin"),
+  async (req, res) => {
+    try {
+      const { studentId: rawStudentId, centerId: rawCenterId, deviceId } =
+        req.body || {};
 
-        const studentId = Number(rawStudentId);
-        const centerId = rawCenterId != null ? Number(rawCenterId) : null;
+      const studentId = Number(rawStudentId);
+      const centerId = rawCenterId != null ? Number(rawCenterId) : null;
 
-        if (!studentId || Number.isNaN(studentId)) {
-          return res.status(400).json({ error: "invalid_student_id" });
-        }
+      if (!studentId || Number.isNaN(studentId)) {
+        return res.status(400).json({ error: "invalid_student_id" });
+      }
 
-        // 1) Find student
-        const [student] = await db
-          .select()
-          .from(students)
-          .where(eq(students.id, studentId));
+      // 1) Find student
+      const [student] = await db
+        .select()
+        .from(students)
+        .where(eq(students.id, studentId));
 
-        if (!student) {
-          return res.status(404).json({ error: "student_not_found" });
-        }
+      if (!student) {
+        return res.status(404).json({ error: "student_not_found" });
+      }
 
-        // Decide centerId: prefer explicit, fallback to student's center
-        const effectiveCenterId = centerId || student.centerId;
+      // Decide centerId: prefer explicit, fallback to student's center
+      const effectiveCenterId = centerId || student.centerId;
 
-        // 2) Validate center
-        const [center] = await db
-          .select()
-          .from(centers)
-          .where(eq(centers.id, effectiveCenterId));
+      // 2) Validate center
+      const [center] = await db
+        .select()
+        .from(centers)
+        .where(eq(centers.id, effectiveCenterId));
 
-        if (!center) {
-          return res.status(400).json({ error: "center_not_found" });
-        }
+      if (!center) {
+        return res.status(400).json({ error: "center_not_found" });
+      }
 
-        // 3) Build "today" window in UTC
-        const now = new Date();
-        const todayStart = new Date(
-          Date.UTC(
-            now.getUTCFullYear(),
-            now.getUTCMonth(),
-            now.getUTCDate(),
-            0,
-            0,
-            0
+      // 3) Build "today" window in UTC
+      const now = new Date();
+      const todayStart = new Date(
+        Date.UTC(
+          now.getUTCFullYear(),
+          now.getUTCMonth(),
+          now.getUTCDate(),
+          0,
+          0,
+          0
+        )
+      );
+      const tomorrowStart = new Date(todayStart);
+      tomorrowStart.setUTCDate(todayStart.getUTCDate() + 1);
+
+      // 4A) Look for an open session (today, center, no checkout)
+      const [openRecord] = await db
+        .select()
+        .from(attendanceRecords)
+        .where(
+          and(
+            eq(attendanceRecords.studentId, studentId),
+            eq(attendanceRecords.centerId, effectiveCenterId),
+            gte(attendanceRecords.checkInAt, todayStart),
+            lt(attendanceRecords.checkInAt, tomorrowStart),
+            sql`check_out_at IS NULL`
+          )
+        )
+        .orderBy(desc(attendanceRecords.checkInAt));
+
+      // 4B) Count how many sessions today (for max 2 sessions rule)
+      const [{ totalSessionsToday }] = await db
+        .select({
+          totalSessionsToday: sql`COUNT(*)`.mapWith(Number),
+        })
+        .from(attendanceRecords)
+        .where(
+          and(
+            eq(attendanceRecords.studentId, studentId),
+            eq(attendanceRecords.centerId, effectiveCenterId),
+            gte(attendanceRecords.checkInAt, todayStart),
+            lt(attendanceRecords.checkInAt, tomorrowStart)
           )
         );
-        const tomorrowStart = new Date(todayStart);
-        tomorrowStart.setUTCDate(todayStart.getUTCDate() + 1);
 
-        // 4) Look for an open session (today, center, no checkout)
-        const [openRecord] = await db
-          .select()
-          .from(attendanceRecords)
-          .where(
-            and(
-              eq(attendanceRecords.studentId, studentId),
-              eq(attendanceRecords.centerId, effectiveCenterId),
-              gte(attendanceRecords.checkInAt, todayStart),
-              lt(attendanceRecords.checkInAt, tomorrowStart),
-              sql`check_out_at IS NULL`
-            )
+      // 4C) Find the last record today (for cooldown / accidental double-scan)
+      const [lastTodayRecord] = await db
+        .select()
+        .from(attendanceRecords)
+        .where(
+          and(
+            eq(attendanceRecords.studentId, studentId),
+            eq(attendanceRecords.centerId, effectiveCenterId),
+            gte(attendanceRecords.checkInAt, todayStart),
+            lt(attendanceRecords.checkInAt, tomorrowStart)
           )
-          .orderBy(desc(attendanceRecords.checkInAt));
+        )
+        .orderBy(desc(attendanceRecords.checkInAt));
 
-        const ipAddress =
-          req.headers["x-forwarded-for"]?.toString().split(",")[0] ||
-          req.ip ||
-          null;
-        const userAgent = req.headers["user-agent"] || null;
+      // --- Anti-accidental double-scan: enforce 1-minute gap between actions ---
+      const MIN_GAP_MS = 60 * 1000; // 1 minute
+      let lastActionAt: Date | null = null;
 
-        // 5A) If open session exists → CHECK-OUT
-        if (openRecord) {
-          await db
-            .update(attendanceRecords)
-            .set({
-              checkOutAt: now,
-              // Optionally override / keep device + audit info
-              deviceId: deviceId || openRecord.deviceId || null,
-              ipAddress: ipAddress || openRecord.ipAddress || null,
-              userAgent: userAgent || openRecord.userAgent || null,
-            })
-            .where(eq(attendanceRecords.id, openRecord.id));
-
-          const [updated] = await db
-            .select()
-            .from(attendanceRecords)
-            .where(eq(attendanceRecords.id, openRecord.id));
-
-          return res.json({
-            ok: true,
-            action: "check_out",
-            record: updated,
-          });
+      if (lastTodayRecord) {
+        if (openRecord && lastTodayRecord.id === openRecord.id) {
+          // Last action was a CHECK-IN for the currently open session
+          lastActionAt = lastTodayRecord.checkInAt;
+        } else {
+          // Last action was the CHECK-OUT (if present), else the CHECK-IN
+          lastActionAt =
+            lastTodayRecord.checkOutAt || lastTodayRecord.checkInAt;
         }
+      }
 
-        // 5B) No open session → CHECK-IN
-        const insertResult = await db.insert(attendanceRecords).values({
-          studentId,
-          centerId: effectiveCenterId,
-          checkInAt: now,
-          status: "present",
-
-          checkInLat: null,
-          checkInLng: null,
-          checkInAccuracy: null,
-          distanceFromCenterMeters: null,
-
-          checkOutAt: null,
-          checkOutLat: null,
-          checkOutLng: null,
-          checkOutAccuracy: null,
-          distanceFromCenterCheckoutMeters: null,
-
-          deviceId: deviceId || null,
-          ipAddress,
-          userAgent,
+      if (
+        lastActionAt &&
+        now.getTime() - new Date(lastActionAt).getTime() < MIN_GAP_MS
+      ) {
+        return res.status(400).json({
+          error: "too_soon",
+          message:
+            "Please wait at least one minute between attendance scans to avoid accidental check-ins/check-outs.",
         });
+      }
 
-        const insertedId =
-          insertResult?.insertId ??
-          insertResult?.[0]?.insertId ??
-          null;
+      // --- Max 2 sessions per day rule ---
+      // If there is NO open session and the student already has 2 sessions today,
+      // do not allow creating a new one.
+      if (!openRecord && totalSessionsToday >= 2) {
+        return res.status(400).json({
+          error: "daily_limit_reached",
+          message:
+            "Maximum number of attendance sessions for today has been reached for this student.",
+        });
+      }
 
-        const [newRecord] = await db
+      const ipAddress =
+        req.headers["x-forwarded-for"]?.toString().split(",")[0] ||
+        req.ip ||
+        null;
+      const userAgent = req.headers["user-agent"] || null;
+
+      // 5A) If open session exists → CHECK-OUT
+      if (openRecord) {
+        await db
+          .update(attendanceRecords)
+          .set({
+            checkOutAt: now,
+            // Optionally override / keep device + audit info
+            deviceId: deviceId || openRecord.deviceId || null,
+            ipAddress: ipAddress || openRecord.ipAddress || null,
+            userAgent: userAgent || openRecord.userAgent || null,
+          })
+          .where(eq(attendanceRecords.id, openRecord.id));
+
+        const [updated] = await db
           .select()
           .from(attendanceRecords)
-          .where(
-            insertedId
-              ? eq(attendanceRecords.id, insertedId)
-              : and(
-                  eq(attendanceRecords.studentId, studentId),
-                  eq(attendanceRecords.centerId, effectiveCenterId),
-                  eq(attendanceRecords.checkInAt, now)
-                )
-          );
+          .where(eq(attendanceRecords.id, openRecord.id));
 
-        return res.status(201).json({
+        return res.json({
           ok: true,
-          action: "check_in",
-          record: newRecord,
+          action: "check_out",
+          record: updated,
         });
-      } catch (err) {
-        console.error("admin_scan_attendance_failed:", err);
-        return res.status(500).json({ error: "admin_scan_attendance_failed" });
       }
+
+      // 5B) No open session → CHECK-IN
+      const insertResult = await db.insert(attendanceRecords).values({
+        studentId,
+        centerId: effectiveCenterId,
+        checkInAt: now,
+        status: "present",
+
+        checkInLat: null,
+        checkInLng: null,
+        checkInAccuracy: null,
+        distanceFromCenterMeters: null,
+
+        checkOutAt: null,
+        checkOutLat: null,
+        checkOutLng: null,
+        checkOutAccuracy: null,
+        distanceFromCenterCheckoutMeters: null,
+
+        deviceId: deviceId || null,
+        ipAddress,
+        userAgent,
+      });
+
+      const insertedId =
+        insertResult?.insertId ??
+        insertResult?.[0]?.insertId ??
+        null;
+
+      const [newRecord] = await db
+        .select()
+        .from(attendanceRecords)
+        .where(
+          insertedId
+            ? eq(attendanceRecords.id, insertedId)
+            : and(
+                eq(attendanceRecords.studentId, studentId),
+                eq(attendanceRecords.centerId, effectiveCenterId),
+                eq(attendanceRecords.checkInAt, now)
+              )
+        );
+
+      return res.status(201).json({
+        ok: true,
+        action: "check_in",
+        record: newRecord,
+      });
+    } catch (err) {
+      console.error("admin_scan_attendance_failed:", err);
+      return res.status(500).json({ error: "admin_scan_attendance_failed" });
     }
-  );
+  }
+);
 
 
   router.get(
