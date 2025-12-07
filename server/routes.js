@@ -113,6 +113,15 @@ function requireRole(role) {
 export function createRouter() {
   const router = express.Router();
 
+router.get("/health", (_req, res) => {
+  res.json({
+    ok: true,
+    uptime: process.uptime(),
+    timezone: process.env.TZ || "not_set",
+    now: new Date(),          // this should now be IST when stringified
+  });
+});
+
   // ─────────────────────────
   // Auth (SUPER SIMPLE)
   // ─────────────────────────

@@ -53,14 +53,7 @@ serveStaticAssets(app, {
   indexFile: "index.html",
 });
 
-app.get("/health", (_req, res) => {
-  res.json({
-    ok: true,
-    uptime: process.uptime(),
-    timezone: process.env.TZ || "not_set",
-    now: new Date(),          // this should now be IST when stringified
-  });
-});
+
 
 
 app.listen(PORT, () => {
