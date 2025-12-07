@@ -54,8 +54,14 @@ serveStaticAssets(app, {
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, uptime: process.uptime(), timezone: process.env.TZ });
+  res.json({
+    ok: true,
+    uptime: process.uptime(),
+    timezone: process.env.TZ || "not_set",
+    now: new Date(),          // this should now be IST when stringified
+  });
 });
+
 
 app.listen(PORT, () => {
   console.log(`Server listening on http://localhost:${PORT} (TZ=${process.env.TZ})`);
