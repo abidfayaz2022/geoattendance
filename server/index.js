@@ -16,7 +16,23 @@ const PORT = process.env.PORT || 4000;
 // CORS – allow your Vite origin with credentials
 app.use(
   cors({
-    origin: ["http://localhost:5000", "http://127.0.0.1:5000", 'https://wcrv93pn-5000.inc1.devtunnels.ms','https://geoattendance-delta.vercel.app',"http://localhost:35863"],
+    origin: (origin, callback) => {
+      const allowedOrigins = [
+        "http://localhost:5000",
+        "http://127.0.0.1:5000",
+        "https://wcrv93pn-5000.inc1.devtunnels.ms",
+        "https://geoattendance-delta.vercel.app"
+      ];
+      
+      // Allow all localhost ports
+      if (!origin || origin.match(/^https?:\/\/(localhost|127\.0\.0\.1):\d+$/)) {
+        callback(null, true);
+      } else if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
     credentials: true,
   })
 );
