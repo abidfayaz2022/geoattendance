@@ -3,7 +3,7 @@ import { QueryClient } from "@tanstack/react-query";
 
 // Read API base URL from env; fallback to same-origin relative if not set
 // Example .env: VITE_API_BASE_URL="https://geoattendance-asi9.onrender.com/api"
-export const API_BASE_URL = "http://localhost:4000/api" || "";
+export const API_BASE_URL = "https://geoattendance-asi9.onrender.com/api" || "";
 
 /**
  * Read auth info from localStorage and build headers.

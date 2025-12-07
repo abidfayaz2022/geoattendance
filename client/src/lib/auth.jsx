@@ -7,7 +7,7 @@ const AuthContext = createContext(null);
 // Read API base URL from env; fallback to same as other frontend code
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL ||
-  "http://localhost:4000/api";
+  "https://geoattendance-asi9.onrender.com/api";
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
