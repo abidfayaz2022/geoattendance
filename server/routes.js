@@ -780,7 +780,7 @@ router.post(
 
       // --- Anti-accidental double-scan: enforce 1-minute gap between actions ---
       const MIN_GAP_MS = 60 * 1000; // 1 minute
-      let lastActionAt: Date | null = null;
+      let lastActionAt = null;
 
       if (lastTodayRecord) {
         if (openRecord && lastTodayRecord.id === openRecord.id) {
