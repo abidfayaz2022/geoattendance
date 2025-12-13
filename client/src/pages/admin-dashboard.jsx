@@ -1,4 +1,11 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+
 import { useAuth } from "@/lib/auth";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
@@ -33,12 +40,448 @@ import {
   Trash2,
   Compass,
   BarChart2,
-  QrCode, // 👈 NEW
+  QrCode,
+  Pencil,
+  Save,
+  X,
 } from "lucide-react";
 import { format } from "date-fns";
 import { buildUrl } from "@/lib/queryClient";
 
+/* ──────────────────────────────────────────────────────────────
+   Small helpers
+────────────────────────────────────────────────────────────── */
+function safeDate(v) {
+  if (!v) return null;
+  const d = v instanceof Date ? v : new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+// For <input type="datetime-local"> value
+function toLocalInputValue(dateLike) {
+  const d = safeDate(dateLike);
+  if (!d) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  const mm = pad(d.getMonth() + 1);
+  const dd = pad(d.getDate());
+  const hh = pad(d.getHours());
+  const mi = pad(d.getMinutes());
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+}
+
+function parseLocalInputToISO(value) {
+  // value like "2025-12-13T18:30"
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+/* ──────────────────────────────────────────────────────────────
+   Attendance Editor (inline panel)
+────────────────────────────────────────────────────────────── */
+function AttendanceEditor({ record, onClose, onSaved, getAuthHeaders }) {
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [message, setMessage] = useState(null);
+
+  // Editor fields
+  const [status, setStatus] = useState((record?.status || "").toString());
+  const [checkInAt, setCheckInAt] = useState(
+    toLocalInputValue(record?.checkInAt || record?.date)
+  );
+  const [checkOutAt, setCheckOutAt] = useState(
+    toLocalInputValue(record?.checkOutAt)
+  );
+
+  useEffect(() => {
+    setStatus((record?.status || "").toString());
+    setCheckInAt(toLocalInputValue(record?.checkInAt || record?.date));
+    setCheckOutAt(toLocalInputValue(record?.checkOutAt));
+    setMessage(null);
+  }, [record]);
+
+  if (!record) return null;
+
+  async function patch(action, body) {
+    const url = buildUrl(`/admin/attendance-records/${record.id}`);
+    const res = await fetch(url, {
+      method: "PATCH",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...getAuthHeaders(),
+      },
+      body: JSON.stringify({ action, ...body }),
+    });
+
+    if (!res.ok) {
+      const text = (await res.text()) || res.statusText;
+      throw new Error(text);
+    }
+    return res.json();
+  }
+
+  async function handleSetStatus() {
+    try {
+      setSaving(true);
+      setMessage(null);
+      await patch("set_status", { status: status.trim() || "present" });
+      setMessage({ type: "success", text: "Status updated." });
+      onSaved?.();
+    } catch (e) {
+      console.error(e);
+      setMessage({ type: "error", text: "Failed to update status." });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleForceCheckout() {
+    try {
+      setSaving(true);
+      setMessage(null);
+      const iso = parseLocalInputToISO(checkOutAt);
+      await patch("force_checkout", { checkOutAt: iso || undefined });
+      setMessage({ type: "success", text: "Checkout saved." });
+      onSaved?.();
+    } catch (e) {
+      console.error(e);
+      setMessage({ type: "error", text: "Failed to save checkout." });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleReopenSession() {
+    try {
+      setSaving(true);
+      setMessage(null);
+      await patch("reopen_session", {});
+      setMessage({
+        type: "success",
+        text: "Session reopened (checkout cleared).",
+      });
+      setCheckOutAt("");
+      onSaved?.();
+    } catch (e) {
+      console.error(e);
+      setMessage({ type: "error", text: "Failed to reopen session." });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSetTimes() {
+    try {
+      setSaving(true);
+      setMessage(null);
+
+      const ci = parseLocalInputToISO(checkInAt);
+      // If user explicitly emptied checkout input, send null to clear it
+      const co = checkOutAt === "" ? null : parseLocalInputToISO(checkOutAt);
+
+      await patch("set_times", {
+        checkInAt: ci || undefined,
+        checkOutAt: co,
+      });
+
+      setMessage({ type: "success", text: "Times updated." });
+      onSaved?.();
+    } catch (e) {
+      console.error(e);
+      setMessage({ type: "error", text: "Failed to update times." });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!window.confirm("Delete this attendance record? This cannot be undone."))
+      return;
+
+    try {
+      setDeleting(true);
+      setMessage(null);
+
+      const url = buildUrl(`/admin/attendance-records/${record.id}`);
+      const res = await fetch(url, {
+        method: "DELETE",
+        credentials: "include",
+        headers: {
+          ...getAuthHeaders(),
+        },
+      });
+
+      if (!res.ok) {
+        const text = (await res.text()) || res.statusText;
+        throw new Error(text);
+      }
+
+      setMessage({ type: "success", text: "Record deleted." });
+      onSaved?.();
+      onClose?.();
+    } catch (e) {
+      console.error(e);
+      setMessage({ type: "error", text: "Failed to delete record." });
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <div className="text-sm font-semibold flex items-center gap-2">
+            <Pencil className="w-4 h-4" />
+            Edit Attendance Record
+          </div>
+          <div className="text-[11px] text-muted-foreground">
+            Record #{record.id} • {record.userName} • Grade {record.userGrade || "N/A"}
+          </div>
+        </div>
+        <Button size="icon" variant="ghost" onClick={onClose}>
+          <X className="w-4 h-4" />
+        </Button>
+      </div>
+
+      {/* Status */}
+      <div className="grid gap-2 md:grid-cols-3">
+        <div className="md:col-span-2">
+          <Input
+            placeholder="Status (present/late/absent...)"
+            value={status}
+            onChange={(e) => setStatus(e.target.value)}
+          />
+        </div>
+        <Button variant="outline" onClick={handleSetStatus} disabled={saving}>
+          <Save className="w-4 h-4 mr-2" />
+          {saving ? "Saving..." : "Set Status"}
+        </Button>
+      </div>
+
+      {/* Times */}
+      <div className="grid gap-2 md:grid-cols-2">
+        <div className="space-y-1">
+          <div className="text-[11px] text-muted-foreground">Check-in time</div>
+          <Input
+            type="datetime-local"
+            value={checkInAt}
+            onChange={(e) => setCheckInAt(e.target.value)}
+          />
+        </div>
+        <div className="space-y-1">
+          <div className="text-[11px] text-muted-foreground">Check-out time</div>
+          <Input
+            type="datetime-local"
+            value={checkOutAt}
+            onChange={(e) => setCheckOutAt(e.target.value)}
+          />
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <Button variant="outline" onClick={handleSetTimes} disabled={saving}>
+          {saving ? "Saving..." : "Save Times"}
+        </Button>
+        <Button variant="outline" onClick={handleForceCheckout} disabled={saving}>
+          {saving ? "Saving..." : "Force Checkout"}
+        </Button>
+        <Button variant="outline" onClick={handleReopenSession} disabled={saving}>
+          {saving ? "Saving..." : "Reopen Session"}
+        </Button>
+        <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
+          {deleting ? "Deleting..." : "Delete Record"}
+        </Button>
+      </div>
+
+      {message && (
+        <div
+          className={`text-[11px] ${message.type === "success" ? "text-emerald-600" : "text-red-600"
+            }`}
+        >
+          {message.text}
+        </div>
+      )}
+    </div>
+  );
+
+}
+
+/* ──────────────────────────────────────────────────────────────
+   QR Cards panel with filters
+────────────────────────────────────────────────────────────── */
+function QrCardsPanel({ getAuthHeaders }) {
+  const [filters, setFilters] = useState({
+    today: false,
+    dateFrom: "",
+    dateTo: "",
+    centerId: "",
+    grade: "",
+    rollNumber: "",
+    email: "",
+    search: "",
+    limit: "200",
+  });
+
+  const [loading, setLoading] = useState(false);
+
+  const buildQrUrl = () => {
+    const q = new URLSearchParams();
+    if (filters.today) q.set("today", "1");
+    if (!filters.today && filters.dateFrom) q.set("dateFrom", filters.dateFrom);
+    if (!filters.today && filters.dateTo) q.set("dateTo", filters.dateTo);
+    if (filters.centerId) q.set("centerId", filters.centerId);
+    if (filters.grade) q.set("grade", filters.grade);
+    if (filters.rollNumber) q.set("rollNumber", filters.rollNumber);
+    if (filters.email) q.set("email", filters.email);
+    if (filters.search) q.set("search", filters.search);
+    if (filters.limit) q.set("limit", filters.limit);
+    return buildUrl(`/admin/students/qr-cards?${q.toString()}`);
+  };
+
+  async function handleDownload() {
+    try {
+      setLoading(true);
+
+      const url = buildQrUrl();
+      const res = await fetch(url, {
+        credentials: "include",
+        headers: {
+          ...getAuthHeaders(),
+        },
+      });
+
+      if (!res.ok) {
+        const text = (await res.text()) || res.statusText;
+        throw new Error(text);
+      }
+
+      const blob = await res.blob();
+      const href = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = href;
+
+      const suffix = filters.today
+        ? "today"
+        : filters.dateFrom || filters.dateTo
+          ? `${filters.dateFrom || "x"}_to_${filters.dateTo || "x"}`
+          : "all";
+
+      a.download = `student_qr_cards_${suffix}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(href);
+    } catch (err) {
+      console.error("QR download failed:", err);
+      alert("Failed to download QR cards PDF. Check filters and try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardContent className="p-4 space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold flex items-center gap-2">
+            <QrCode className="w-4 h-4 text-slate-700" />
+            QR Cards PDF
+          </h3>
+          <Button
+            size="xs"
+            variant="outline"
+            onClick={handleDownload}
+            disabled={loading}
+          >
+            {loading ? "Generating…" : "Download"}
+          </Button>
+        </div>
+
+        <p className="text-[11px] text-muted-foreground">
+          Filter QR cards by today/date range, email, roll number, grade, centerId,
+          etc.
+        </p>
+
+        <div className="grid gap-2 md:grid-cols-2">
+          <Button
+            type="button"
+            size="sm"
+            variant={filters.today ? "default" : "outline"}
+            onClick={() => setFilters((p) => ({ ...p, today: !p.today }))}
+          >
+            {filters.today ? "Today: ON" : "Today: OFF"}
+          </Button>
+
+          <Input
+            placeholder="Limit (max 500)"
+            type="number"
+            min="1"
+            max="500"
+            value={filters.limit}
+            onChange={(e) => setFilters((p) => ({ ...p, limit: e.target.value }))}
+          />
+
+          <Input
+            type="date"
+            disabled={filters.today}
+            value={filters.dateFrom}
+            onChange={(e) => setFilters((p) => ({ ...p, dateFrom: e.target.value }))}
+            placeholder="Date From"
+          />
+          <Input
+            type="date"
+            disabled={filters.today}
+            value={filters.dateTo}
+            onChange={(e) => setFilters((p) => ({ ...p, dateTo: e.target.value }))}
+            placeholder="Date To"
+          />
+
+          <Input
+            placeholder="Center ID"
+            value={filters.centerId}
+            onChange={(e) => setFilters((p) => ({ ...p, centerId: e.target.value }))}
+          />
+          <Input
+            placeholder="Grade"
+            value={filters.grade}
+            onChange={(e) => setFilters((p) => ({ ...p, grade: e.target.value }))}
+          />
+
+          <Input
+            placeholder="Roll Number"
+            value={filters.rollNumber}
+            onChange={(e) =>
+              setFilters((p) => ({ ...p, rollNumber: e.target.value }))
+            }
+          />
+          <Input
+            placeholder="Email"
+            value={filters.email}
+            onChange={(e) => setFilters((p) => ({ ...p, email: e.target.value }))}
+          />
+
+          <Input
+            className="md:col-span-2"
+            placeholder="Search (name/email contains)"
+            value={filters.search}
+            onChange={(e) => setFilters((p) => ({ ...p, search: e.target.value }))}
+          />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────
+   Main AdminDashboard
+────────────────────────────────────────────────────────────── */
 export default function AdminDashboard() {
+  const editorRef = useRef(null);
+
   const { user, logout } = useAuth();
   const [_, setLocation] = useLocation();
 
@@ -53,9 +496,7 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // ─────────────────────────────
-  // NEW: Attendance report state
-  // ─────────────────────────────
+  // Attendance report state
   const [reportFilters, setReportFilters] = useState({
     centerId: "",
     grade: "",
@@ -71,9 +512,7 @@ export default function AdminDashboard() {
   const [reportError, setReportError] = useState(null);
   const [reportCsvLoading, setReportCsvLoading] = useState(false);
 
-  // ─────────────────────────────
-  // NEW: Student management state
-  // ─────────────────────────────
+  // Student management state
   const [studentForm, setStudentForm] = useState({
     name: "",
     email: "",
@@ -91,16 +530,12 @@ export default function AdminDashboard() {
 
   const [studentsExportLoading, setStudentsExportLoading] = useState(false);
 
-  // ─────────────────────────────
-  // NEW: CSV import state
-  // ─────────────────────────────
+  // CSV import state
   const [importFile, setImportFile] = useState(null);
   const [importLoading, setImportLoading] = useState(false);
   const [importResult, setImportResult] = useState(null);
 
-  // ─────────────────────────────
-  // NEW: Center geofence state
-  // ─────────────────────────────
+  // Center geofence state
   const [centerForm, setCenterForm] = useState({
     centerId: "",
     lat: "",
@@ -110,21 +545,24 @@ export default function AdminDashboard() {
   const [centerUpdateLoading, setCenterUpdateLoading] = useState(false);
   const [centerUpdateMessage, setCenterUpdateMessage] = useState(null);
 
-  // ─────────────────────────────
-  // NEW: QR cards download state
-  // ─────────────────────────────
-  const [qrCardsLoading, setQrCardsLoading] = useState(false);
+  // NEW: record editor selection
+  const [editingRecord, setEditingRecord] = useState(null);
 
-  // ─────────────────────────────
-  // NEW: helper for header-based auth
-  // ─────────────────────────────
-  const getAuthHeaders = () => {
+
+  const openEditor = useCallback((rec) => {
+  setEditingRecord(rec);
+}, []);
+
+
+
+  // header-based auth
+  const getAuthHeaders = useCallback(() => {
     if (!user) return {};
     return {
       "x-user-id": String(user.id),
-      "x-user-password": user.passwordHash, // stored from login
+      "x-user-password": user.passwordHash,
     };
-  };
+  }, [user]);
 
   // Redirect if not admin
   useEffect(() => {
@@ -135,143 +573,105 @@ export default function AdminDashboard() {
     }
   }, [user, setLocation]);
 
-  // Fetch stats + basic attendance records
-  useEffect(() => {
+  // Central reload function (so editor can refresh)
+  const reloadAdminData = useCallback(async () => {
     if (!user || user.role !== "admin") return;
 
-    let cancelled = false;
+    try {
+      setLoading(true);
+      setError(null);
 
-    async function fetchData() {
-      try {
-        setLoading(true);
-        setError(null);
+      const authHeaders = getAuthHeaders();
 
-        const authHeaders = getAuthHeaders();
+      const [statsRes, recordsRes] = await Promise.all([
+        fetch(buildUrl("/admin/stats"), {
+          credentials: "include",
+          headers: { ...authHeaders },
+        }),
+        fetch(buildUrl("/admin/attendance-records"), {
+          credentials: "include",
+          headers: { ...authHeaders },
+        }),
+      ]);
 
-        const [statsRes, recordsRes] = await Promise.all([
-          fetch(buildUrl("/admin/stats"), {
-            credentials: "include",
-            headers: {
-              ...authHeaders,
-            },
-          }),
-          fetch(buildUrl("/admin/attendance-records"), {
-            credentials: "include",
-            headers: {
-              ...authHeaders,
-            },
-          }),
-        ]);
-
-        if (!statsRes.ok) {
-          const text = (await statsRes.text()) || statsRes.statusText;
-          throw new Error(`Stats error: ${text}`);
-        }
-        if (!recordsRes.ok) {
-          const text = (await recordsRes.text()) || recordsRes.statusText;
-          throw new Error(`Records error: ${text}`);
-        }
-
-        const statsJson = await statsRes.json();
-        const recordsJson = await recordsRes.json();
-
-        if (!cancelled) {
-          setStats({
-            totalStudents: statsJson.totalStudents ?? 0,
-            presentToday: statsJson.presentToday ?? 0,
-            attendanceRate: statsJson.attendanceRate ?? 0,
-          });
-          setRecords(Array.isArray(recordsJson) ? recordsJson : []);
-        }
-      } catch (err) {
-        console.error("Failed to load admin data:", err);
-        if (!cancelled) {
-          setError(
-            "Failed to load attendance data. Please refresh or try again later."
-          );
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
+      if (!statsRes.ok) {
+        const text = (await statsRes.text()) || statsRes.statusText;
+        throw new Error(`Stats error: ${text}`);
       }
-    }
+      if (!recordsRes.ok) {
+        const text = (await recordsRes.text()) || recordsRes.statusText;
+        throw new Error(`Records error: ${text}`);
+      }
 
-    fetchData();
-    return () => {
-      cancelled = true;
-    };
-  }, [user]);
+      const statsJson = await statsRes.json();
+      const recordsJson = await recordsRes.json();
+
+      setStats({
+        totalStudents: statsJson.totalStudents ?? 0,
+        presentToday: statsJson.presentToday ?? 0,
+        attendanceRate: statsJson.attendanceRate ?? 0,
+      });
+      setRecords(Array.isArray(recordsJson) ? recordsJson : []);
+    } catch (err) {
+      console.error("Failed to load admin data:", err);
+      setError("Failed to load attendance data. Please refresh or try again later.");
+    } finally {
+      setLoading(false);
+    }
+  }, [user, getAuthHeaders]);
+
+  // initial load
+  useEffect(() => {
+    reloadAdminData();
+  }, [reloadAdminData]);
 
   if (!user || user.role !== "admin") return null;
 
   const { totalStudents, presentToday, attendanceRate } = stats;
 
-  // Build grade options dynamically from records (plus "All")
+  // Grade options
   const gradeOptions = useMemo(() => {
     const set = new Set();
     records.forEach((r) => {
-      if (r.userGrade && r.userGrade !== "N/A") {
-        set.add(r.userGrade);
-      }
+      if (r.userGrade && r.userGrade !== "N/A") set.add(r.userGrade);
     });
     return Array.from(set).sort();
   }, [records]);
 
-  // Filter logic for main sheet
+  // Filter main table
   const filteredRecords = useMemo(() => {
     const search = searchTerm.trim().toLowerCase();
-
     return records.filter((record) => {
       const matchesSearch =
         !search ||
         record.userName?.toLowerCase().includes(search) ||
         record.userId?.toLowerCase().includes(search);
 
-      const matchesGrade =
-        gradeFilter === "all" || record.userGrade === gradeFilter;
+      const matchesGrade = gradeFilter === "all" || record.userGrade === gradeFilter;
 
       return matchesSearch && matchesGrade;
     });
   }, [records, searchTerm, gradeFilter]);
 
-  // Debug summary: how many SKIPPED and check-out entries
-  const attendanceDebug = useMemo(() => {
-    let skipped = 0;
-    let withCheckout = 0;
+  // Convert report row shape to editor record shape
+  const reportRowToEditorRecord = useCallback((row) => {
+    if (!row) return null;
+    return {
+      id: row.id,
+      userName: row.studentName,
+      userId: String(row.studentId ?? ""),
+      userGrade: row.grade ?? "N/A",
+      status: row.status,
+      checkInAt: row.checkInAt,
+      checkOutAt: row.checkOutAt,
+    };
+  }, []);
 
-    records.forEach((r) => {
-      const status = (r.status || "").toString().toLowerCase();
-      if (status === "skipped") skipped++;
-      if (r.checkOutAt || r.checkOutTime) withCheckout++;
-    });
-
-    return { skipped, withCheckout };
-  }, [records]);
-
-  useEffect(() => {
-    if (!records.length) return;
-    console.log("[ADMIN] Attendance debug summary:", {
-      total: records.length,
-      skipped: attendanceDebug.skipped,
-      withCheckout: attendanceDebug.withCheckout,
-    });
-    console.log("[ADMIN] Raw attendance records sample:", records.slice(0, 10));
-  }, [records, attendanceDebug]);
-
-  // ─────────────────────────────
-  // Handlers: Attendance report
-  // ─────────────────────────────
+  // Attendance report
   async function handleGenerateReport(pageOverride) {
     if (!user) return;
 
-    const {
-      centerId,
-      grade,
-      status,
-      dateFrom,
-      dateTo,
-      page,
-      pageSize,
-    } = reportFilters;
+    const { centerId, grade, status, dateFrom, dateTo, page, pageSize } = reportFilters;
 
     const query = new URLSearchParams();
     if (centerId) query.set("centerId", centerId);
@@ -288,13 +688,9 @@ export default function AdminDashboard() {
       setReportLoading(true);
       setReportError(null);
 
-      const authHeaders = getAuthHeaders();
-
       const res = await fetch(url, {
         credentials: "include",
-        headers: {
-          ...authHeaders,
-        },
+        headers: { ...getAuthHeaders() },
       });
       if (!res.ok) {
         const text = (await res.text()) || res.statusText;
@@ -310,17 +706,12 @@ export default function AdminDashboard() {
       }
     } catch (err) {
       console.error("Failed to generate report:", err);
-      setReportError(
-        "Failed to load report. Please check filters and try again."
-      );
+      setReportError("Failed to load report. Please check filters and try again.");
     } finally {
       setReportLoading(false);
     }
   }
 
-  // ─────────────────────────────
-  // NEW: Export attendance report CSV
-  // ─────────────────────────────
   async function handleExportReportCsv() {
     if (!user) return;
 
@@ -333,20 +724,14 @@ export default function AdminDashboard() {
     if (dateFrom) query.set("dateFrom", dateFrom);
     if (dateTo) query.set("dateTo", dateTo);
 
-    const url = buildUrl(
-      `/admin/attendance-report/export?${query.toString()}`
-    );
+    const url = buildUrl(`/admin/attendance-report/export?${query.toString()}`);
 
     try {
       setReportCsvLoading(true);
 
-      const authHeaders = getAuthHeaders();
-
       const res = await fetch(url, {
         credentials: "include",
-        headers: {
-          ...authHeaders,
-        },
+        headers: { ...getAuthHeaders() },
       });
       if (!res.ok) {
         const text = (await res.text()) || res.statusText;
@@ -372,9 +757,6 @@ export default function AdminDashboard() {
     }
   }
 
-  // ─────────────────────────────
-  // Handlers: Export students CSV
-  // ─────────────────────────────
   async function handleExportStudents() {
     try {
       setStudentsExportLoading(true);
@@ -385,13 +767,9 @@ export default function AdminDashboard() {
 
       const url = buildUrl(`/admin/students/export?${query.toString()}`);
 
-      const authHeaders = getAuthHeaders();
-
       const res = await fetch(url, {
         credentials: "include",
-        headers: {
-          ...authHeaders,
-        },
+        headers: { ...getAuthHeaders() },
       });
       if (!res.ok) {
         const text = (await res.text()) || res.statusText;
@@ -415,49 +793,6 @@ export default function AdminDashboard() {
     }
   }
 
-  // ─────────────────────────────
-  // NEW: Handlers: Download QR cards PDF
-  // ─────────────────────────────
-  async function handleDownloadQrCards() {
-    if (!user) return;
-
-    try {
-      setQrCardsLoading(true);
-
-      const authHeaders = getAuthHeaders();
-
-      const res = await fetch(buildUrl("/admin/students/qr-cards"), {
-        credentials: "include",
-        headers: {
-          ...authHeaders,
-        },
-      });
-
-      if (!res.ok) {
-        const text = (await res.text()) || res.statusText;
-        throw new Error(text);
-      }
-
-      const blob = await res.blob();
-      const href = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = href;
-      a.download = "student_qr_cards.pdf";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(href);
-    } catch (err) {
-      console.error("Failed to download QR cards:", err);
-      alert("Failed to download QR cards PDF. Please try again.");
-    } finally {
-      setQrCardsLoading(false);
-    }
-  }
-
-  // ─────────────────────────────
-  // Handlers: Add student
-  // ─────────────────────────────
   async function handleAddStudent(e) {
     e.preventDefault();
     const { name, email, password, centerId, grade, rollNumber } = studentForm;
@@ -474,14 +809,12 @@ export default function AdminDashboard() {
       setStudentAddLoading(true);
       setStudentAddMessage(null);
 
-      const authHeaders = getAuthHeaders();
-
       const res = await fetch(buildUrl("/admin/students"), {
         method: "POST",
         credentials: "include",
         headers: {
           "Content-Type": "application/json",
-          ...authHeaders,
+          ...getAuthHeaders(),
         },
         body: JSON.stringify({
           name,
@@ -499,10 +832,7 @@ export default function AdminDashboard() {
       }
 
       await res.json();
-      setStudentAddMessage({
-        type: "success",
-        text: "Student created successfully.",
-      });
+      setStudentAddMessage({ type: "success", text: "Student created successfully." });
 
       setStudentForm({
         name: "",
@@ -512,6 +842,9 @@ export default function AdminDashboard() {
         grade: "",
         rollNumber: "",
       });
+
+      // refresh stats/records
+      await reloadAdminData();
     } catch (err) {
       console.error("Failed to add student:", err);
       setStudentAddMessage({
@@ -523,9 +856,6 @@ export default function AdminDashboard() {
     }
   }
 
-  // ─────────────────────────────
-  // Handlers: Delete student
-  // ─────────────────────────────
   async function handleDeleteStudent() {
     if (!studentDeleteId) {
       setStudentDeleteMessage({
@@ -535,24 +865,18 @@ export default function AdminDashboard() {
       return;
     }
 
-    if (!window.confirm("Are you sure you want to delete this student?")) {
-      return;
-    }
+    if (!window.confirm("Are you sure you want to delete this student?")) return;
 
     try {
       setStudentDeleteLoading(true);
       setStudentDeleteMessage(null);
-
-      const authHeaders = getAuthHeaders();
 
       const res = await fetch(
         buildUrl(`/admin/students/${encodeURIComponent(studentDeleteId)}`),
         {
           method: "DELETE",
           credentials: "include",
-          headers: {
-            ...authHeaders,
-          },
+          headers: { ...getAuthHeaders() },
         }
       );
 
@@ -562,11 +886,10 @@ export default function AdminDashboard() {
       }
 
       await res.json();
-      setStudentDeleteMessage({
-        type: "success",
-        text: "Student deleted successfully.",
-      });
+      setStudentDeleteMessage({ type: "success", text: "Student deleted successfully." });
       setStudentDeleteId("");
+
+      await reloadAdminData();
     } catch (err) {
       console.error("Failed to delete student:", err);
       setStudentDeleteMessage({
@@ -578,16 +901,10 @@ export default function AdminDashboard() {
     }
   }
 
-  // ─────────────────────────────
-  // Handlers: Import CSV
-  // ─────────────────────────────
   async function handleImportCsv(e) {
     e.preventDefault();
     if (!importFile) {
-      setImportResult({
-        type: "error",
-        text: "Please choose a CSV file to import.",
-      });
+      setImportResult({ type: "error", text: "Please choose a CSV file to import." });
       return;
     }
 
@@ -598,14 +915,10 @@ export default function AdminDashboard() {
       const formData = new FormData();
       formData.append("file", importFile);
 
-      const authHeaders = getAuthHeaders();
-
       const res = await fetch(buildUrl("/admin/students/import"), {
         method: "POST",
         credentials: "include",
-        headers: {
-          ...authHeaders,
-        },
+        headers: { ...getAuthHeaders() },
         body: formData,
       });
 
@@ -617,20 +930,16 @@ export default function AdminDashboard() {
       const json = await res.json();
       setImportResult({
         type: "success",
-        text: `Imported successfully. Users: ${
-          json.summary?.createdUsers ?? 0
-        }, Students: ${json.summary?.createdStudents ?? 0}, Skipped existing: ${
-          json.summary?.skippedExisting ?? 0
-        }, Errors: ${json.summary?.rowsWithErrors ?? 0}`,
+        text: `Imported successfully. Users: ${json.summary?.createdUsers ?? 0}, Students: ${json.summary?.createdStudents ?? 0
+          }, Skipped: ${json.summary?.skippedExisting ?? 0}, Errors: ${json.summary?.rowsWithErrors ?? 0
+          }`,
         raw: json,
-      });
-      console.log("[ADMIN] Students CSV import result:", {
-        summary: json.summary,
-        errors: json.errors,
       });
 
       setImportFile(null);
       e.target.reset?.();
+
+      await reloadAdminData();
     } catch (err) {
       console.error("Failed to import CSV:", err);
       setImportResult({
@@ -642,9 +951,6 @@ export default function AdminDashboard() {
     }
   }
 
-  // ─────────────────────────────
-  // Handlers: Update center location
-  // ─────────────────────────────
   async function handleUpdateCenter(e) {
     e.preventDefault();
     const { centerId, lat, lng, radiusMeters } = centerForm;
@@ -661,8 +967,6 @@ export default function AdminDashboard() {
       setCenterUpdateLoading(true);
       setCenterUpdateMessage(null);
 
-      const authHeaders = getAuthHeaders();
-
       const res = await fetch(
         buildUrl(`/admin/centers/${encodeURIComponent(centerId)}/location`),
         {
@@ -670,7 +974,7 @@ export default function AdminDashboard() {
           credentials: "include",
           headers: {
             "Content-Type": "application/json",
-            ...authHeaders,
+            ...getAuthHeaders(),
           },
           body: JSON.stringify({
             lat: Number(lat),
@@ -686,7 +990,6 @@ export default function AdminDashboard() {
       }
 
       await res.json();
-
       setCenterUpdateMessage({
         type: "success",
         text: "Center geofence updated successfully.",
@@ -711,9 +1014,7 @@ export default function AdminDashboard() {
             <div className="bg-primary text-primary-foreground p-2 rounded-lg">
               <CalendarCheck className="w-5 h-5" />
             </div>
-            <span className="font-heading font-bold text-xl">
-              Admin Portal
-            </span>
+            <span className="font-heading font-bold text-xl">Admin Portal</span>
           </div>
 
           <div className="flex items-center gap-4">
@@ -747,9 +1048,7 @@ export default function AdminDashboard() {
                 <Users className="w-8 h-8 text-white" />
               </div>
               <div>
-                <p className="text-blue-100 font-medium text-sm">
-                  Total Students
-                </p>
+                <p className="text-blue-100 font-medium text-sm">Total Students</p>
                 <h3 className="text-3xl font-bold">{totalStudents}</h3>
               </div>
             </CardContent>
@@ -761,9 +1060,7 @@ export default function AdminDashboard() {
                 <CalendarCheck className="w-8 h-8 text-white" />
               </div>
               <div>
-                <p className="text-emerald-100 font-medium text-sm">
-                  Present Today
-                </p>
+                <p className="text-emerald-100 font-medium text-sm">Present Today</p>
                 <h3 className="text-3xl font-bold">{presentToday}</h3>
               </div>
             </CardContent>
@@ -775,25 +1072,19 @@ export default function AdminDashboard() {
                 <Percent className="w-8 h-8 text-white" />
               </div>
               <div>
-                <p className="text-purple-100 font-medium text-sm">
-                  Attendance Rate
-                </p>
+                <p className="text-purple-100 font-medium text-sm">Attendance Rate</p>
                 <h3 className="text-3xl font-bold">{attendanceRate}%</h3>
               </div>
             </CardContent>
           </Card>
         </div>
 
-        {/* Main Content: Live attendance sheet */}
+        {/* Live attendance sheet */}
         <div className="grid gap-6">
           <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
             <div>
-              <h2 className="text-2xl font-bold tracking-tight">
-                Attendance Sheet
-              </h2>
-              <p className="text-muted-foreground">
-                Monitor real-time student check-ins.
-              </p>
+              <h2 className="text-2xl font-bold tracking-tight">Attendance Sheet</h2>
+              <p className="text-muted-foreground">Monitor real-time student check-ins.</p>
             </div>
 
             <div className="flex gap-3 w-full md:w-auto">
@@ -806,10 +1097,7 @@ export default function AdminDashboard() {
                   onChange={(e) => setSearchTerm(e.target.value)}
                 />
               </div>
-              <Select
-                value={gradeFilter}
-                onValueChange={(value) => setGradeFilter(value)}
-              >
+              <Select value={gradeFilter} onValueChange={setGradeFilter}>
                 <SelectTrigger className="w-[160px]">
                   <SelectValue placeholder="Filter Grade" />
                 </SelectTrigger>
@@ -830,14 +1118,28 @@ export default function AdminDashboard() {
             </div>
           </div>
 
-          {(attendanceDebug.skipped > 0 ||
-            attendanceDebug.withCheckout > 0) && (
-            <p className="text-xs text-muted-foreground">
-              Debug: {attendanceDebug.skipped} entries with status{" "}
-              <code>SKIPPED</code>, {attendanceDebug.withCheckout} entries with
-              checkout time.
-            </p>
-          )}
+          <Dialog open={!!editingRecord} onOpenChange={(open) => !open && setEditingRecord(null)}>
+            <DialogContent className="max-w-2xl">
+              <DialogHeader>
+                <DialogTitle>Edit Attendance</DialogTitle>
+              </DialogHeader>
+
+              {editingRecord && (
+                <AttendanceEditor
+                  record={editingRecord}
+                  onClose={() => setEditingRecord(null)}
+                  onSaved={async () => {
+                    await reloadAdminData();
+                    if (reportMeta || reportRows.length > 0) {
+                      await handleGenerateReport(reportFilters.page);
+                    }
+                  }}
+                  getAuthHeaders={getAuthHeaders}
+                />
+              )}
+            </DialogContent>
+          </Dialog>
+
 
           <Card>
             {loading ? (
@@ -845,141 +1147,102 @@ export default function AdminDashboard() {
                 Loading attendance records…
               </div>
             ) : error ? (
-              <div className="py-10 text-center text-red-600 text-sm">
-                {error}
-              </div>
+              <div className="py-10 text-center text-red-600 text-sm">{error}</div>
             ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Student Name</TableHead>
-                    <TableHead>Grade</TableHead>
-                    <TableHead>Date</TableHead>
-                    <TableHead>In</TableHead>
-                    <TableHead>Out</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Location</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {filteredRecords.length === 0 ? (
+              <div className="max-h-[520px] overflow-auto">
+                <Table>
+                  <TableHeader className="sticky top-0 bg-white dark:bg-slate-900 z-10">
                     <TableRow>
-                      <TableCell
-                        colSpan={7}
-                        className="text-center py-8 text-muted-foreground"
-                      >
-                        No records found matching your filters.
-                      </TableCell>
+                      <TableHead>Student Name</TableHead>
+                      <TableHead>Grade</TableHead>
+                      <TableHead>Date</TableHead>
+                      <TableHead>In</TableHead>
+                      <TableHead>Out</TableHead>
+                      <TableHead>Status</TableHead>
+                      
+                      <TableHead className="text-right">Actions</TableHead>
                     </TableRow>
-                  ) : (
-                    filteredRecords.map((record) => {
-                      const checkInDate = record.checkInAt
-                        ? new Date(record.checkInAt)
-                        : record.date
-                        ? new Date(record.date)
-                        : null;
+                  </TableHeader>
+                  <TableBody>
+                    {filteredRecords.length === 0 ? (
+                      <TableRow>
+                        <TableCell
+                          colSpan={8}
+                          className="text-center py-8 text-muted-foreground"
+                        >
+                          No records found matching your filters.
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      filteredRecords.map((record) => {
+                        const checkInDate = safeDate(record.checkInAt || record.date);
+                        const checkOutDate = safeDate(
+                          record.checkOutAt || record.checkOutTime
+                        );
 
-                      const checkOutDate = record.checkOutAt
-                        ? new Date(record.checkOutAt)
-                        : record.checkOutTime
-                        ? new Date(record.checkOutTime)
-                        : null;
+                        const dateStr = checkInDate
+                          ? format(checkInDate, "MMM dd, yyyy")
+                          : "—";
+                        const checkInStr = checkInDate
+                          ? format(checkInDate, "hh:mm a")
+                          : "—";
+                        const checkOutStr = checkOutDate
+                          ? format(checkOutDate, "hh:mm a")
+                          : "—";
 
-                      const dateStr = checkInDate
-                        ? format(checkInDate, "MMM dd, yyyy")
-                        : "—";
+                        const statusText = (record.status || "").toString().toUpperCase();
 
-                      const checkInStr = checkInDate
-                        ? format(checkInDate, "hh:mm a")
-                        : "—";
-
-                      const checkOutStr = checkOutDate
-                        ? format(checkOutDate, "hh:mm a")
-                        : "—";
-
-                      return (
-                        <TableRow key={record.id}>
-                          <TableCell className="font-medium">
-                            <div className="flex flex-col">
-                              <span>{record.userName}</span>
-                              <span className="text-xs text-muted-foreground">
-                                {record.userId}
-                              </span>
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <Badge
-                              variant="secondary"
-                              className="rounded-sm font-normal"
-                            >
-                              {record.userGrade || "N/A"}
-                            </Badge>
-                          </TableCell>
-                          <TableCell>{dateStr}</TableCell>
-                          <TableCell>{checkInStr}</TableCell>
-                          <TableCell>{checkOutStr}</TableCell>
-                          <TableCell>
-                            <Badge className="bg-green-100 text-green-700 hover:bg-green-100 border-green-200 shadow-none">
-                              {(record.status || "")
-                                .toString()
-                                .toUpperCase()}
-                            </Badge>
-                          </TableCell>
-                          <TableCell>
-                            {record.location || record.checkOutLocation ? (
-                              <div className="flex flex-col text-xs text-muted-foreground">
-                                {record.location && (
-                                  <div className="flex items-center">
-                                    <MapPin className="w-3 h-3 mr-1" />
-                                    <span>
-                                      IN:{" "}
-                                      {Number(
-                                        record.location.lat
-                                      ).toFixed(4)}
-                                      ,{" "}
-                                      {Number(
-                                        record.location.lng
-                                      ).toFixed(4)}
-                                    </span>
-                                  </div>
-                                )}
-                                {record.checkOutLocation && (
-                                  <div className="flex items-center mt-0.5">
-                                    <MapPin className="w-3 h-3 mr-1" />
-                                    <span>
-                                      OUT:{" "}
-                                      {Number(
-                                        record.checkOutLocation.lat
-                                      ).toFixed(4)}
-                                      ,{" "}
-                                      {Number(
-                                        record.checkOutLocation.lng
-                                      ).toFixed(4)}
-                                    </span>
-                                  </div>
-                                )}
+                        return (
+                          <TableRow key={record.id}>
+                            <TableCell className="font-medium">
+                              <div className="flex flex-col">
+                                <span>{record.userName}</span>
+                                <span className="text-xs text-muted-foreground">
+                                  {record.userId}
+                                </span>
                               </div>
-                            ) : (
-                              <span className="text-xs text-muted-foreground">
-                                —
-                              </span>
-                            )}
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })
-                  )}
-                </TableBody>
-              </Table>
+                            </TableCell>
+                            <TableCell>
+                              <Badge variant="secondary" className="rounded-sm font-normal">
+                                {record.userGrade || "N/A"}
+                              </Badge>
+                            </TableCell>
+                            <TableCell>{dateStr}</TableCell>
+                            <TableCell>{checkInStr}</TableCell>
+                            <TableCell>{checkOutStr}</TableCell>
+                            <TableCell>
+                              <Badge variant="outline" className="text-xs font-normal">
+                                {statusText || "—"}
+                              </Badge>
+                            </TableCell>
+                            
+                            <TableCell className="text-right">
+                              <div className="flex justify-end gap-2">
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => openEditor(record)}
+
+                                >
+                                  <Pencil className="w-4 h-4 mr-1" />
+                                  Edit
+                                </Button>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
             )}
           </Card>
         </div>
 
-        {/* ─────────────────────────────────────────────
-            Reports & Management Section
-            ───────────────────────────────────────────── */}
+        {/* Reports & Management */}
         <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Attendance Report (takes 2 columns) */}
+          {/* Attendance Report */}
           <Card className="lg:col-span-2">
             <CardContent className="p-6 space-y-4">
               <div className="flex items-center justify-between gap-2">
@@ -1013,29 +1276,20 @@ export default function AdminDashboard() {
                 </div>
               </div>
 
-              {/* Filters */}
               <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-4">
                 <Input
                   type="date"
                   value={reportFilters.dateFrom}
                   onChange={(e) =>
-                    setReportFilters((prev) => ({
-                      ...prev,
-                      dateFrom: e.target.value,
-                    }))
+                    setReportFilters((p) => ({ ...p, dateFrom: e.target.value }))
                   }
-                  placeholder="From date"
                 />
                 <Input
                   type="date"
                   value={reportFilters.dateTo}
                   onChange={(e) =>
-                    setReportFilters((prev) => ({
-                      ...prev,
-                      dateTo: e.target.value,
-                    }))
+                    setReportFilters((p) => ({ ...p, dateTo: e.target.value }))
                   }
-                  placeholder="To date"
                 />
                 <Input
                   type="number"
@@ -1043,30 +1297,21 @@ export default function AdminDashboard() {
                   placeholder="Center ID"
                   value={reportFilters.centerId}
                   onChange={(e) =>
-                    setReportFilters((prev) => ({
-                      ...prev,
-                      centerId: e.target.value,
-                    }))
+                    setReportFilters((p) => ({ ...p, centerId: e.target.value }))
                   }
                 />
                 <Input
                   placeholder="Grade (optional)"
                   value={reportFilters.grade}
                   onChange={(e) =>
-                    setReportFilters((prev) => ({
-                      ...prev,
-                      grade: e.target.value,
-                    }))
+                    setReportFilters((p) => ({ ...p, grade: e.target.value }))
                   }
                 />
                 <Input
                   placeholder="Status (present/late...)"
                   value={reportFilters.status}
                   onChange={(e) =>
-                    setReportFilters((prev) => ({
-                      ...prev,
-                      status: e.target.value,
-                    }))
+                    setReportFilters((p) => ({ ...p, status: e.target.value }))
                   }
                 />
                 <Input
@@ -1076,33 +1321,28 @@ export default function AdminDashboard() {
                   placeholder="Page size"
                   value={reportFilters.pageSize}
                   onChange={(e) =>
-                    setReportFilters((prev) => ({
-                      ...prev,
+                    setReportFilters((p) => ({
+                      ...p,
                       pageSize: e.target.value || 50,
                     }))
                   }
                 />
               </div>
 
-              {reportError && (
-                <div className="text-xs text-red-600">{reportError}</div>
-              )}
+              {reportError && <div className="text-xs text-red-600">{reportError}</div>}
 
-              {/* Report meta & pagination */}
               {reportMeta && (
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
                   <span>
-                    Showing {reportRows.length} of {reportMeta.total} records (
-                    page {reportMeta.page} / {reportMeta.totalPages || 1})
+                    Showing {reportRows.length} of {reportMeta.total} records (page{" "}
+                    {reportMeta.page} / {reportMeta.totalPages || 1})
                   </span>
                   <div className="flex gap-2">
                     <Button
                       size="xs"
                       variant="outline"
                       disabled={reportLoading || reportMeta.page <= 1}
-                      onClick={() =>
-                        handleGenerateReport(reportMeta.page - 1)
-                      }
+                      onClick={() => handleGenerateReport(reportMeta.page - 1)}
                     >
                       Prev
                     </Button>
@@ -1114,9 +1354,7 @@ export default function AdminDashboard() {
                         !reportMeta.totalPages ||
                         reportMeta.page >= reportMeta.totalPages
                       }
-                      onClick={() =>
-                        handleGenerateReport(reportMeta.page + 1)
-                      }
+                      onClick={() => handleGenerateReport(reportMeta.page + 1)}
                     >
                       Next
                     </Button>
@@ -1124,7 +1362,6 @@ export default function AdminDashboard() {
                 </div>
               )}
 
-              {/* Report table */}
               <div className="border rounded-md overflow-hidden">
                 {reportLoading ? (
                   <div className="py-8 text-center text-muted-foreground text-sm">
@@ -1135,78 +1372,85 @@ export default function AdminDashboard() {
                     No report data yet. Choose filters and click Generate.
                   </div>
                 ) : (
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Student</TableHead>
-                        <TableHead>Grade</TableHead>
-                        <TableHead>Center</TableHead>
-                        <TableHead>Date</TableHead>
-                        <TableHead>In</TableHead>
-                        <TableHead>Out</TableHead>
-                        <TableHead>Status</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {reportRows.map((row) => {
-                        const inDate = row.checkInAt
-                          ? new Date(row.checkInAt)
-                          : null;
-                        const outDate = row.checkOutAt
-                          ? new Date(row.checkOutAt)
-                          : null;
+                  <div className="max-h-[520px] overflow-auto">
+                    <Table>
+                      <TableHeader className="sticky top-0 bg-white dark:bg-slate-900 z-10">
+                        <TableRow>
+                          <TableHead>Student</TableHead>
+                          <TableHead>Grade</TableHead>
+                          <TableHead>Center</TableHead>
+                          <TableHead>Date</TableHead>
+                          <TableHead>In</TableHead>
+                          <TableHead>Out</TableHead>
+                          <TableHead>Status</TableHead>
+                          <TableHead className="text-right">Actions</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {reportRows.map((row) => {
+                          const inDate = safeDate(row.checkInAt);
+                          const outDate = safeDate(row.checkOutAt);
 
-                        return (
-                          <TableRow key={row.id}>
-                            <TableCell className="font-medium">
-                              <div className="flex flex-col">
-                                <span>{row.studentName}</span>
-                                <span className="text-[10px] text-muted-foreground">
-                                  {row.studentEmail || "—"} • ID:{" "}
-                                  {row.studentId}
-                                </span>
-                              </div>
-                            </TableCell>
-                            <TableCell>{row.grade || "N/A"}</TableCell>
-                            <TableCell className="text-xs">
-                              <div className="flex flex-col">
-                                <span>{row.centerName || "—"}</span>
-                                <span className="text-[10px] text-muted-foreground">
-                                  {row.centerCode || ""}{" "}
-                                  {row.centerId ? `(#${row.centerId})` : ""}
-                                </span>
-                              </div>
-                            </TableCell>
-                            <TableCell>
-                              {inDate ? format(inDate, "MMM dd, yyyy") : "—"}
-                            </TableCell>
-                            <TableCell>
-                              {inDate ? format(inDate, "hh:mm a") : "—"}
-                            </TableCell>
-                            <TableCell>
-                              {outDate ? format(outDate, "hh:mm a") : "—"}
-                            </TableCell>
-                            <TableCell>
-                              <Badge
-                                variant="outline"
-                                className="text-xs font-normal"
-                              >
-                                {(row.status || "").toUpperCase()}
-                              </Badge>
-                            </TableCell>
-                          </TableRow>
-                        );
-                      })}
-                    </TableBody>
-                  </Table>
+                          return (
+                            <TableRow key={row.id}>
+                              <TableCell className="font-medium">
+                                <div className="flex flex-col">
+                                  <span>{row.studentName}</span>
+                                  <span className="text-[10px] text-muted-foreground">
+                                    {row.studentEmail || "—"} • ID: {row.studentId}
+                                  </span>
+                                </div>
+                              </TableCell>
+                              <TableCell>{row.grade || "N/A"}</TableCell>
+                              <TableCell className="text-xs">
+                                <div className="flex flex-col">
+                                  <span>{row.centerName || "—"}</span>
+                                  <span className="text-[10px] text-muted-foreground">
+                                    {row.centerCode || ""}{" "}
+                                    {row.centerId ? `(#${row.centerId})` : ""}
+                                  </span>
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                {inDate ? format(inDate, "MMM dd, yyyy") : "—"}
+                              </TableCell>
+                              <TableCell>
+                                {inDate ? format(inDate, "hh:mm a") : "—"}
+                              </TableCell>
+                              <TableCell>
+                                {outDate ? format(outDate, "hh:mm a") : "—"}
+                              </TableCell>
+                              <TableCell>
+                                <Badge variant="outline" className="text-xs font-normal">
+                                  {(row.status || "").toUpperCase()}
+                                </Badge>
+                              </TableCell>
+
+                              <TableCell className="text-right">
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => openEditor(reportRowToEditorRecord(row))}
+
+                                >
+                                  <Pencil className="w-4 h-4 mr-1" />
+                                  Edit
+                                </Button>
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  </div>
                 )}
               </div>
             </CardContent>
           </Card>
 
-          {/* Right column: Students & Geofence tools */}
+          {/* Right column */}
           <div className="space-y-4">
-            {/* Students: export + import */}
+            {/* Student Data */}
             <Card>
               <CardContent className="p-4 space-y-3">
                 <div className="flex items-center justify-between gap-2">
@@ -1214,35 +1458,25 @@ export default function AdminDashboard() {
                     <FileDown className="w-4 h-4 text-slate-700" />
                     Student Data
                   </h3>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      size="xs"
-                      variant="outline"
-                      onClick={handleExportStudents}
-                      disabled={studentsExportLoading}
-                    >
-                      {studentsExportLoading ? "Exporting…" : "Export CSV"}
-                    </Button>
-                    <Button
-                      size="xs"
-                      variant="outline"
-                      onClick={handleDownloadQrCards}
-                      disabled={qrCardsLoading}
-                    >
-                      <QrCode className="w-3 h-3 mr-1" />
-                      {qrCardsLoading ? "Generating…" : "QR Cards PDF"}
-                    </Button>
-                  </div>
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={handleExportStudents}
+                    disabled={studentsExportLoading}
+                  >
+                    {studentsExportLoading ? "Exporting…" : "Export CSV"}
+                  </Button>
                 </div>
+
                 <p className="text-[11px] text-muted-foreground">
-                  Export all students (or filtered by centerId) with their
-                  hashed passwords, or download printable QR cards PDF.
+                  Export all students (or filtered by centerId) with their stored passwords.
                 </p>
 
-                <form
-                  className="border-t pt-3 mt-3 space-y-2"
-                  onSubmit={handleImportCsv}
-                >
+                {/* QR Cards with filters */}
+                <QrCardsPanel getAuthHeaders={getAuthHeaders} />
+
+                {/* Import CSV */}
+                <form className="border-t pt-3 mt-3 space-y-2" onSubmit={handleImportCsv}>
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2 text-xs font-medium">
                       <FileUp className="w-4 h-4 text-slate-700" />
@@ -1252,32 +1486,22 @@ export default function AdminDashboard() {
                       type="file"
                       accept=".csv,text/csv"
                       className="h-8 text-xs"
-                      onChange={(e) =>
-                        setImportFile(e.target.files?.[0] || null)
-                      }
+                      onChange={(e) => setImportFile(e.target.files?.[0] || null)}
                     />
                   </div>
                   <p className="text-[11px] text-muted-foreground">
                     Expected columns:{" "}
-                    <code>
-                      name,email,password,role,centerCode,grade,rollNumber
-                    </code>
+                    <code>name,email,password,role,centerCode,grade,rollNumber</code>
                   </p>
-                  <Button
-                    type="submit"
-                    size="xs"
-                    className="w-full mt-1"
-                    disabled={importLoading}
-                  >
+                  <Button type="submit" size="xs" className="w-full mt-1" disabled={importLoading}>
                     {importLoading ? "Importing…" : "Import Students"}
                   </Button>
                   {importResult && (
                     <p
-                      className={`text-[11px] mt-1 ${
-                        importResult.type === "success"
-                          ? "text-emerald-600"
-                          : "text-red-600"
-                      }`}
+                      className={`text-[11px] mt-1 ${importResult.type === "success"
+                        ? "text-emerald-600"
+                        : "text-red-600"
+                        }`}
                     >
                       {importResult.text}
                     </p>
@@ -1298,10 +1522,7 @@ export default function AdminDashboard() {
                     placeholder="Full name"
                     value={studentForm.name}
                     onChange={(e) =>
-                      setStudentForm((prev) => ({
-                        ...prev,
-                        name: e.target.value,
-                      }))
+                      setStudentForm((p) => ({ ...p, name: e.target.value }))
                     }
                   />
                   <Input
@@ -1309,10 +1530,7 @@ export default function AdminDashboard() {
                     placeholder="Email"
                     value={studentForm.email}
                     onChange={(e) =>
-                      setStudentForm((prev) => ({
-                        ...prev,
-                        email: e.target.value,
-                      }))
+                      setStudentForm((p) => ({ ...p, email: e.target.value }))
                     }
                   />
                   <Input
@@ -1320,10 +1538,7 @@ export default function AdminDashboard() {
                     placeholder="Temporary password"
                     value={studentForm.password}
                     onChange={(e) =>
-                      setStudentForm((prev) => ({
-                        ...prev,
-                        password: e.target.value,
-                      }))
+                      setStudentForm((p) => ({ ...p, password: e.target.value }))
                     }
                   />
                   <Input
@@ -1331,10 +1546,7 @@ export default function AdminDashboard() {
                     placeholder="Center ID"
                     value={studentForm.centerId}
                     onChange={(e) =>
-                      setStudentForm((prev) => ({
-                        ...prev,
-                        centerId: e.target.value,
-                      }))
+                      setStudentForm((p) => ({ ...p, centerId: e.target.value }))
                     }
                   />
                   <div className="grid grid-cols-2 gap-2">
@@ -1342,38 +1554,29 @@ export default function AdminDashboard() {
                       placeholder="Grade (optional)"
                       value={studentForm.grade}
                       onChange={(e) =>
-                        setStudentForm((prev) => ({
-                          ...prev,
-                          grade: e.target.value,
-                        }))
+                        setStudentForm((p) => ({ ...p, grade: e.target.value }))
                       }
                     />
                     <Input
                       placeholder="Roll no. (optional)"
                       value={studentForm.rollNumber}
                       onChange={(e) =>
-                        setStudentForm((prev) => ({
-                          ...prev,
+                        setStudentForm((p) => ({
+                          ...p,
                           rollNumber: e.target.value,
                         }))
                       }
                     />
                   </div>
-                  <Button
-                    type="submit"
-                    size="sm"
-                    className="w-full"
-                    disabled={studentAddLoading}
-                  >
+                  <Button type="submit" size="sm" className="w-full" disabled={studentAddLoading}>
                     {studentAddLoading ? "Creating…" : "Create Student"}
                   </Button>
                   {studentAddMessage && (
                     <p
-                      className={`text-[11px] mt-1 ${
-                        studentAddMessage.type === "success"
-                          ? "text-emerald-600"
-                          : "text-red-600"
-                      }`}
+                      className={`text-[11px] mt-1 ${studentAddMessage.type === "success"
+                        ? "text-emerald-600"
+                        : "text-red-600"
+                        }`}
                     >
                       {studentAddMessage.text}
                     </p>
@@ -1387,13 +1590,10 @@ export default function AdminDashboard() {
               <CardContent className="p-4 space-y-3">
                 <div className="flex items-center gap-2">
                   <Trash2 className="w-4 h-4 text-red-600" />
-                  <h3 className="text-sm font-semibold text-red-700">
-                    Delete Student
-                  </h3>
+                  <h3 className="text-sm font-semibold text-red-700">Delete Student</h3>
                 </div>
                 <p className="text-[11px] text-muted-foreground">
-                  Provide the <strong>student ID</strong> (not user ID). You can
-                  see it under Attendance Sheet.
+                  Provide the <strong>student ID</strong> (not user ID).
                 </p>
                 <div className="flex gap-2">
                   <Input
@@ -1414,11 +1614,10 @@ export default function AdminDashboard() {
                 </div>
                 {studentDeleteMessage && (
                   <p
-                    className={`text-[11px] ${
-                      studentDeleteMessage.type === "success"
-                        ? "text-emerald-600"
-                        : "text-red-600"
-                    }`}
+                    className={`text-[11px] ${studentDeleteMessage.type === "success"
+                      ? "text-emerald-600"
+                      : "text-red-600"
+                      }`}
                   >
                     {studentDeleteMessage.text}
                   </p>
@@ -1426,90 +1625,7 @@ export default function AdminDashboard() {
               </CardContent>
             </Card>
 
-            {/* Center geofence */}
-            <Card>
-              <CardContent className="p-4 space-y-3">
-                <div className="flex items-center gap-2">
-                  <Compass className="w-4 h-4 text-slate-700" />
-                  <h3 className="text-sm font-semibold">Center Geofence</h3>
-                </div>
-                <p className="text-[11px] text-muted-foreground">
-                  Update latitude, longitude and allowed radius (meters) for a
-                  center.
-                </p>
-                <form
-                  className="space-y-2 text-xs"
-                  onSubmit={handleUpdateCenter}
-                >
-                  <Input
-                    type="number"
-                    placeholder="Center ID"
-                    value={centerForm.centerId}
-                    onChange={(e) =>
-                      setCenterForm((prev) => ({
-                        ...prev,
-                        centerId: e.target.value,
-                      }))
-                    }
-                  />
-                  <Input
-                    type="number"
-                    step="0.000001"
-                    placeholder="Latitude"
-                    value={centerForm.lat}
-                    onChange={(e) =>
-                      setCenterForm((prev) => ({
-                        ...prev,
-                        lat: e.target.value,
-                      }))
-                    }
-                  />
-                  <Input
-                    type="number"
-                    step="0.000001"
-                    placeholder="Longitude"
-                    value={centerForm.lng}
-                    onChange={(e) =>
-                      setCenterForm((prev) => ({
-                        ...prev,
-                        lng: e.target.value,
-                      }))
-                    }
-                  />
-                  <Input
-                    type="number"
-                    step="1"
-                    placeholder="Radius (meters)"
-                    value={centerForm.radiusMeters}
-                    onChange={(e) =>
-                      setCenterForm((prev) => ({
-                        ...prev,
-                        radiusMeters: e.target.value,
-                      }))
-                    }
-                  />
-                  <Button
-                    type="submit"
-                    size="sm"
-                    className="w-full"
-                    disabled={centerUpdateLoading}
-                  >
-                    {centerUpdateLoading ? "Updating…" : "Update Center Location"}
-                  </Button>
-                  {centerUpdateMessage && (
-                    <p
-                      className={`text-[11px] mt-1 ${
-                        centerUpdateMessage.type === "success"
-                          ? "text-emerald-600"
-                          : "text-red-600"
-                      }`}
-                    >
-                      {centerUpdateMessage.text}
-                    </p>
-                  )}
-                </form>
-              </CardContent>
-            </Card>
+            
           </div>
         </section>
       </main>

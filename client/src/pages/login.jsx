@@ -94,7 +94,7 @@ export default function LoginPage({ mode = "student" }) {
             KIE
           </h1>
           <p className="text-slate-500 dark:text-slate-400">
-            Secure Geo-fenced Attendance System
+            Secure KIE Attendance System
           </p>
         </div>
 

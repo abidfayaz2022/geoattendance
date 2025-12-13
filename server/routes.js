@@ -316,10 +316,15 @@ export function createRouter() {
         const rows = await db
           .select({
             id: attendanceRecords.id,
-            date: attendanceRecords.checkInAt,
+            checkInAt: attendanceRecords.checkInAt,
+            checkOutAt: attendanceRecords.checkOutAt,
             status: attendanceRecords.status,
+
             checkInLat: attendanceRecords.checkInLat,
             checkInLng: attendanceRecords.checkInLng,
+
+            checkOutLat: attendanceRecords.checkOutLat,
+            checkOutLng: attendanceRecords.checkOutLng,
           })
           .from(attendanceRecords)
           .where(eq(attendanceRecords.studentId, student.id))
@@ -328,13 +333,15 @@ export function createRouter() {
 
         const mapped = rows.map((r) => ({
           id: r.id,
-          date: r.date, // raw Date from DB (UTC under the hood)
-          time: r.date ? formatISTDateTime(r.date) : null, // IST string
+
+          checkInAt: r.checkInAt,
+          checkInTime: r.checkInAt ? formatISTDateTime(r.checkInAt) : null,
+
+          checkOutAt: r.checkOutAt,
+          checkOutTime: r.checkOutAt ? formatISTDateTime(r.checkOutAt) : null,
+
           status: r.status || "present",
-          location:
-            r.checkInLat != null && r.checkInLng != null
-              ? { lat: Number(r.checkInLat), lng: Number(r.checkInLng) }
-              : null,
+
         }));
 
         res.json(mapped);
@@ -346,127 +353,228 @@ export function createRouter() {
   );
 
   /**
-   * GET /student/attendance/report?from=YYYY-MM-DD&to=YYYY-MM-DD&format=csv|json
-   */
-  router.get(
-    "/student/attendance/report",
-    simpleAuth,
-    requireRole("student"),
-    async (req, res) => {
-      try {
-        const studentUserId = Number(req.user.id);
-        const fromStr = String(req.query.from || "");
-        const toStr = String(req.query.to || "");
-        const format = (req.query.format || "csv").toString().toLowerCase();
+ * GET /student/attendance/report?from=YYYY-MM-DD&to=YYYY-MM-DD&format=csv|json
+ *
+ * Calendar view:
+ *  - one row per day
+ *  - present if any session exists
+ *  - absent otherwise
+ *
+ * Sessions view:
+ *  - includes ALL attendance records (multiple per day supported)
+ */
+router.get(
+  "/student/attendance/report",
+  simpleAuth,
+  requireRole("student"),
+  async (req, res) => {
+    try {
+      const studentUserId = Number(req.user.id);
+      const fromStr = String(req.query.from || "");
+      const toStr = String(req.query.to || "");
+      const format = (req.query.format || "csv").toString().toLowerCase();
 
-        if (!fromStr || !toStr) {
-          return res.status(400).json({ error: "from_and_to_required" });
-        }
+      if (!fromStr || !toStr) {
+        return res.status(400).json({ error: "from_and_to_required" });
+      }
 
-        const fromDateRaw = parseLocalDateOnly(fromStr);
-        const toDateRaw = parseLocalDateOnly(toStr);
+      const fromDateRaw = parseLocalDateOnly(fromStr);
+      const toDateRaw = parseLocalDateOnly(toStr);
 
-        if (
-          !fromDateRaw ||
-          !toDateRaw ||
-          Number.isNaN(fromDateRaw.getTime()) ||
-          Number.isNaN(toDateRaw.getTime())
-        ) {
-          return res.status(400).json({ error: "invalid_date_range" });
-        }
+      if (
+        !fromDateRaw ||
+        !toDateRaw ||
+        Number.isNaN(fromDateRaw.getTime()) ||
+        Number.isNaN(toDateRaw.getTime())
+      ) {
+        return res.status(400).json({ error: "invalid_date_range" });
+      }
 
-        const { start: fromStart } = getLocalDayRange(fromDateRaw);
-        const { end: toEnd } = getLocalDayRange(toDateRaw);
+      if (fromDateRaw.getTime() > toDateRaw.getTime()) {
+        return res.status(400).json({ error: "from_after_to" });
+      }
 
-        const [student] = await db
-          .select()
-          .from(students)
-          .where(eq(students.userId, studentUserId));
+      const { start: fromStart } = getLocalDayRange(fromDateRaw);
+      const { end: toEndExclusive } = getLocalDayRange(toDateRaw);
 
-        if (!student) {
-          return res.status(404).json({ error: "student_not_found" });
-        }
+      const [student] = await db
+        .select()
+        .from(students)
+        .where(eq(students.userId, studentUserId));
 
-        const rows = await db
-          .select()
-          .from(attendanceRecords)
-          .where(
-            and(
-              eq(attendanceRecords.studentId, student.id),
-              gte(attendanceRecords.checkInAt, fromStart),
-              lt(attendanceRecords.checkInAt, toEnd)
-            )
+      if (!student) {
+        return res.status(404).json({ error: "student_not_found" });
+      }
+
+      // Pull ALL records in window (this is the per-session truth)
+      const rows = await db
+        .select({
+          id: attendanceRecords.id,
+          checkInAt: attendanceRecords.checkInAt,
+          checkOutAt: attendanceRecords.checkOutAt,
+          status: attendanceRecords.status,
+        })
+        .from(attendanceRecords)
+        .where(
+          and(
+            eq(attendanceRecords.studentId, student.id),
+            gte(attendanceRecords.checkInAt, fromStart),
+            lt(attendanceRecords.checkInAt, toEndExclusive)
           )
-          .orderBy(desc(attendanceRecords.checkInAt));
+        )
+        .orderBy(desc(attendanceRecords.checkInAt));
 
-        if (format === "json") {
-          const mapped = rows.map((r) => ({
-            id: r.id,
-            checkInAt: r.checkInAt,
-            checkOutAt: r.checkOutAt,
-            status: r.status,
-            checkInLat: r.checkInLat,
-            checkInLng: r.checkInLng,
-            checkOutLat: r.checkOutLat,
-            checkOutLng: r.checkOutLng,
-            distanceFromCenterMeters: r.distanceFromCenterMeters,
-            distanceFromCenterCheckoutMeters:
-              r.distanceFromCenterCheckoutMeters,
-          }));
-          return res.json({ from: fromStart, to: toEnd, records: mapped });
-        }
+      // ---- Helpers ----
+      const toISTDateOnly = (dt) => {
+        const full = formatISTDateTime(dt);
+        return full ? full.split(" ")[0] : null; // YYYY-MM-DD
+      };
 
-        // default CSV
-        res.setHeader("Content-Type", "text/csv; charset=utf-8");
-        res.setHeader(
-          "Content-Disposition",
-          `attachment; filename="attendance_${studentUserId}_${fromStr}_${toStr}.csv"`
+      const buildDateListInclusive = (fromDate, toDate) => {
+        const out = [];
+        const cursor = new Date(
+          fromDate.getFullYear(),
+          fromDate.getMonth(),
+          fromDate.getDate(),
+          0,
+          0,
+          0
+        );
+        const end = new Date(
+          toDate.getFullYear(),
+          toDate.getMonth(),
+          toDate.getDate(),
+          0,
+          0,
+          0
         );
 
-        const header = [
-          "id",
-          "check_in_at",
-          "check_out_at",
-          "status",
-          "check_in_lat",
-          "check_in_lng",
-          "check_out_lat",
-          "check_out_lng",
-          "distance_from_center_m",
-          "distance_from_center_checkout_m",
-        ];
-
-        const lines = [header.join(",")];
-
-        const formatLocal = (dt) => formatISTDateTime(dt) || "";
-
-        for (const r of rows) {
-          const row = [
-            r.id,
-            formatLocal(r.checkInAt),
-            formatLocal(r.checkOutAt),
-            r.status || "",
-            r.checkInLat != null ? Number(r.checkInLat) : "",
-            r.checkInLng != null ? Number(r.checkInLng) : "",
-            r.checkOutLat != null ? Number(r.checkOutLat) : "",
-            r.checkOutLng != null ? Number(r.checkOutLng) : "",
-            r.distanceFromCenterMeters != null
-              ? Number(r.distanceFromCenterMeters)
-              : "",
-            r.distanceFromCenterCheckoutMeters != null
-              ? Number(r.distanceFromCenterCheckoutMeters)
-              : "",
-          ];
-          lines.push(row.join(","));
+        while (cursor.getTime() <= end.getTime()) {
+          out.push(new Date(cursor));
+          cursor.setDate(cursor.getDate() + 1);
         }
+        return out;
+      };
 
-        res.send(lines.join("\n"));
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "student_export_failed" });
+      // Build sessions array (every record preserved)
+      const sessions = rows.map((r) => ({
+        id: r.id,
+        date: r.checkInAt ? toISTDateOnly(r.checkInAt) : null,
+        checkInTime: r.checkInAt ? formatISTDateTime(r.checkInAt) : null,
+        checkOutTime: r.checkOutAt ? formatISTDateTime(r.checkOutAt) : null,
+        status: r.status || "present",
+      }));
+
+      // Build daily calendar aggregate map
+      // Map YYYY-MM-DD -> { firstCheckInAt, lastCheckOutAt, sessionsCount }
+      const byDate = new Map();
+
+      for (const r of rows) {
+        if (!r.checkInAt) continue;
+
+        const dayKey = toISTDateOnly(r.checkInAt);
+        if (!dayKey) continue;
+
+        const ci = r.checkInAt ? new Date(r.checkInAt) : null;
+        const co = r.checkOutAt ? new Date(r.checkOutAt) : null;
+
+        const prev = byDate.get(dayKey);
+
+        if (!prev) {
+          byDate.set(dayKey, {
+            firstCheckInAt: ci,
+            lastCheckOutAt: co,
+            sessionsCount: 1,
+          });
+        } else {
+          prev.sessionsCount += 1;
+
+          if (ci && prev.firstCheckInAt && ci.getTime() < prev.firstCheckInAt.getTime()) {
+            prev.firstCheckInAt = ci;
+          }
+
+          if (co) {
+            if (!prev.lastCheckOutAt || co.getTime() > prev.lastCheckOutAt.getTime()) {
+              prev.lastCheckOutAt = co;
+            }
+          }
+        }
       }
+
+      const allDates = buildDateListInclusive(fromDateRaw, toDateRaw);
+
+      // ---- JSON ----
+      if (format === "json") {
+        const calendar = allDates.map((d) => {
+          const day = toISTDateOnly(d);
+          const info = day ? byDate.get(day) : null;
+
+          return {
+            date: day,
+            status: info ? "present" : "absent",
+            firstCheckInTime: info?.firstCheckInAt ? formatISTDateTime(info.firstCheckInAt) : null,
+            lastCheckOutTime: info?.lastCheckOutAt ? formatISTDateTime(info.lastCheckOutAt) : null,
+            sessions: info?.sessionsCount || 0,
+          };
+        });
+
+        return res.json({
+          from: fromStr,
+          to: toStr,
+          calendar,   // one row per day (with absent)
+          sessions,   // ALL entries (multiple per day)
+        });
+      }
+
+      // ---- CSV ----
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="attendance_${studentUserId}_${fromStr}_${toStr}.csv"`
+      );
+
+      const lines = [];
+
+      // 1) Calendar CSV section
+      lines.push("CALENDAR_REPORT");
+      lines.push(
+        ["date", "status", "first_check_in_time_ist", "last_check_out_time_ist", "sessions"].join(",")
+      );
+
+      for (const d of allDates) {
+        const day = toISTDateOnly(d);
+        const info = day ? byDate.get(day) : null;
+
+        const statusOut = info ? "present" : "absent";
+        const firstIn = info?.firstCheckInAt ? formatISTDateTime(info.firstCheckInAt) : "";
+        const lastOut = info?.lastCheckOutAt ? formatISTDateTime(info.lastCheckOutAt) : "";
+        const sessionsCount = info?.sessionsCount ? String(info.sessionsCount) : "0";
+
+        lines.push([day, statusOut, firstIn, lastOut, sessionsCount].join(","));
+      }
+
+      // blank lines separator
+      lines.push("");
+      lines.push("");
+
+      // 2) Sessions CSV section (every record)
+      lines.push("SESSION_REPORT");
+      lines.push(["id", "date", "check_in_time_ist", "check_out_time_ist", "status"].join(","));
+
+      for (const s of sessions) {
+        lines.push(
+          [s.id, s.date || "", s.checkInTime || "", s.checkOutTime || "", s.status || ""].join(",")
+        );
+      }
+
+      return res.send(lines.join("\n"));
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "student_export_failed" });
     }
-  );
+  }
+);
+
 
   // ─────────────────────────
   // ADMIN APIs (protected)
@@ -952,10 +1060,10 @@ export function createRouter() {
             insertedId
               ? eq(attendanceRecords.id, insertedId)
               : and(
-                  eq(attendanceRecords.studentId, studentId),
-                  eq(attendanceRecords.centerId, effectiveCenterId),
-                  eq(attendanceRecords.checkInAt, now)
-                )
+                eq(attendanceRecords.studentId, studentId),
+                eq(attendanceRecords.centerId, effectiveCenterId),
+                eq(attendanceRecords.checkInAt, now)
+              )
           );
 
         return res.status(201).json({
@@ -1566,28 +1674,109 @@ export function createRouter() {
     }
   );
 
-  /**
-   * GET /admin/students/qr-cards
-   *
-   * Generates a PDF with QR cards for all students.
-   * Each card contains:
-   *  - Student name
-   *  - Center code
-   *  - Student ID
-   *  - QR code (payload = studentId)
-   *
-   * Auth:
-   *  - x-user-id (admin)
-   *  - x-user-password
-   */
   router.get(
     "/admin/students/qr-cards",
     simpleAuth,
     requireRole("admin"),
     async (req, res) => {
       try {
-        // 1) Fetch all students + user + center
-        const rows = await db
+        const q = req.query || {};
+
+        // ---- Parse filters safely ----
+        const centerId = q.centerId ? Number(q.centerId) : null;
+        const grade = q.grade ? String(q.grade).trim() : null;
+        const rollNumber = q.rollNumber ? String(q.rollNumber).trim() : null;
+        const email = q.email ? String(q.email).toLowerCase().trim() : null;
+        const search = q.search ? String(q.search).trim() : null;
+
+        // multi studentId support: ?studentId=1&studentId=2 or comma-separated
+        const studentIdListRaw = []
+          .concat(q.studentId || [])
+          .flatMap((v) => String(v).split(","))
+          .map((v) => Number(String(v).trim()))
+          .filter((n) => n && !Number.isNaN(n));
+
+        let limit = q.limit ? parseInt(String(q.limit), 10) : 200;
+        let offset = q.offset ? parseInt(String(q.offset), 10) : 0;
+        if (Number.isNaN(limit) || limit < 1) limit = 200;
+        if (Number.isNaN(offset) || offset < 0) offset = 0;
+
+        // Hard caps for safety
+        const MAX_LIMIT = 500;         // prevent someone generating 20k cards in one go
+        const MAX_OFFSET = 50_000;     // sanity
+        if (limit > MAX_LIMIT) limit = MAX_LIMIT;
+        if (offset > MAX_OFFSET) offset = MAX_OFFSET;
+
+        // Date filtering (uses users.createdAt as “student added date”)
+        // today=1 overrides dateFrom/dateTo
+        const today = q.today === "1" || q.today === "true";
+        const dateFromStr = q.dateFrom ? String(q.dateFrom) : null;
+        const dateToStr = q.dateTo ? String(q.dateTo) : null;
+
+        let fromStart = null;
+        let toEnd = null;
+
+        if (today) {
+          const now = new Date();
+          const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+          const end = new Date(start);
+          end.setDate(start.getDate() + 1);
+          fromStart = start;
+          toEnd = end;
+        } else if (dateFromStr || dateToStr) {
+          const fromDate = dateFromStr ? parseLocalDateOnly(dateFromStr) : null;
+          const toDate = dateToStr ? parseLocalDateOnly(dateToStr) : null;
+
+          if (dateFromStr && !fromDate) return res.status(400).json({ error: "invalid_dateFrom" });
+          if (dateToStr && !toDate) return res.status(400).json({ error: "invalid_dateTo" });
+
+          // If only one is provided, treat as single-day filter
+          const base = fromDate || toDate;
+          const start = new Date(base.getFullYear(), base.getMonth(), base.getDate(), 0, 0, 0);
+          const end = new Date(start);
+          end.setDate(start.getDate() + 1);
+
+          // If both provided, do a range (inclusive end-date)
+          if (fromDate && toDate) {
+            fromStart = new Date(fromDate.getFullYear(), fromDate.getMonth(), fromDate.getDate(), 0, 0, 0);
+            toEnd = new Date(toDate.getFullYear(), toDate.getMonth(), toDate.getDate() + 1, 0, 0, 0);
+          } else {
+            fromStart = start;
+            toEnd = end;
+          }
+        }
+
+        // ---- Build SQL conditions (push filters to DB) ----
+        const conditions = [];
+
+        if (centerId) conditions.push(eq(students.centerId, centerId));
+        if (grade) conditions.push(eq(students.grade, grade));
+        if (rollNumber) conditions.push(eq(students.rollNumber, rollNumber));
+        if (email) conditions.push(eq(users.email, email));
+
+        if (studentIdListRaw.length) {
+          // Drizzle MySQL: use sql`... IN (...)` if you don’t have inArray helper
+          conditions.push(sql`${students.id} IN (${sql.join(studentIdListRaw)})`);
+        }
+
+        if (fromStart && toEnd) {
+          // IMPORTANT: students table has no createdAt, so filter on users.createdAt
+          conditions.push(gte(users.createdAt, fromStart));
+          conditions.push(lt(users.createdAt, toEnd));
+        }
+
+        if (search) {
+          // lightweight contains search on name/email
+          const like = `%${search.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
+          conditions.push(
+            sql`(${users.name} LIKE ${like} OR ${users.email} LIKE ${like})`
+          );
+        }
+
+        const whereExpr = conditions.length ? and(...conditions) : undefined;
+
+        // ---- Query rows (paged) ----
+        let query = db
           .select({
             studentId: students.id,
             userId: users.id,
@@ -1598,41 +1787,43 @@ export function createRouter() {
             centerId: centers.id,
             centerName: centers.name,
             centerCode: centers.code,
+            addedAt: users.createdAt, // for debugging/reporting
           })
           .from(students)
           .leftJoin(users, eq(students.userId, users.id))
           .leftJoin(centers, eq(students.centerId, centers.id))
-          .orderBy(centers.code, users.name);
+          .orderBy(centers.code, users.name)
+          .limit(limit)
+          .offset(offset);
+
+        if (whereExpr) query = query.where(whereExpr);
+
+        const rows = await query;
 
         if (!rows.length) {
           return res.status(404).json({ error: "no_students_found" });
         }
 
-        // 2) Prepare PDF response headers
+        // ---- PDF streaming response ----
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader(
           "Content-Disposition",
-          'attachment; filename="student_qr_cards.pdf"'
+          `attachment; filename="student_qr_cards_${Date.now()}.pdf"`
         );
 
-        const doc = new PDFDocument({
-          size: "A4",
-          margin: 36,
-        });
-
+        const doc = new PDFDocument({ size: "A4", margin: 36 });
         doc.pipe(res);
 
-        // Layout config (tweak as you like)
         const cardWidth = 260;
         const cardHeight = 150;
-        const cols = 2; // 2 cards per row
-        const rowsPerPage = 4; // 4 rows per page → 8 cards / page
+        const cols = 2;
+        const rowsPerPage = 4;
 
         let colIndex = 0;
         let rowIndex = 0;
 
+        // Generate sequentially to avoid huge memory spikes
         for (const s of rows) {
-          // New page if filled current one
           if (rowIndex >= rowsPerPage) {
             doc.addPage();
             rowIndex = 0;
@@ -1642,25 +1833,19 @@ export function createRouter() {
           const x = doc.page.margins.left + colIndex * cardWidth;
           const y = doc.page.margins.top + rowIndex * cardHeight;
 
-          // Card border
-          doc
-            .roundedRect(x, y, cardWidth - 10, cardHeight - 10, 10)
-            .stroke();
+          doc.roundedRect(x, y, cardWidth - 10, cardHeight - 10, 10).stroke();
 
-          // Header: Center name & code
-          doc
-            .fontSize(10)
-            .text(s.centerName || "", x + 12, y + 10, {
-              width: cardWidth - 120,
-              ellipsis: true,
-            });
+          doc.fontSize(10).text(s.centerName || "", x + 12, y + 10, {
+            width: cardWidth - 120,
+            ellipsis: true,
+          });
+
           doc
             .fontSize(9)
             .fillColor("#555555")
             .text(`Center: ${s.centerCode || ""}`, x + 12, y + 26)
             .fillColor("black");
 
-          // Student name
           doc
             .fontSize(12)
             .font("Helvetica-Bold")
@@ -1670,27 +1855,21 @@ export function createRouter() {
             })
             .font("Helvetica");
 
-          // ID & other info
           doc
             .fontSize(9)
             .text(`Student ID: ${s.studentId}`, x + 12, y + 72)
             .text(`Roll: ${s.rollNumber || "-"}`, x + 12, y + 86)
             .text(`Grade: ${s.grade || "-"}`, x + 12, y + 100);
 
-          // 3) Generate QR for this student (payload = studentId)
-          const qrPayload = String(s.studentId);
-          const qrBuffer = await QRCode.toBuffer(qrPayload, {
-            width: 100,
-            margin: 1,
-          });
+          // QR payload: keep stable and future-proof
+          // Option A: just studentId (what you have now)
+          // Option B: "student:{id}" so later you can version it
+          const qrPayload = `student:${s.studentId}`;
 
-          // Place QR on right side of card
-          doc.image(qrBuffer, x + cardWidth - 120, y + 40, {
-            width: 90,
-            height: 90,
-          });
+          const qrBuffer = await QRCode.toBuffer(qrPayload, { width: 100, margin: 1 });
 
-          // Move layout cursor
+          doc.image(qrBuffer, x + cardWidth - 120, y + 40, { width: 90, height: 90 });
+
           colIndex++;
           if (colIndex >= cols) {
             colIndex = 0;
@@ -1701,12 +1880,199 @@ export function createRouter() {
         doc.end();
       } catch (err) {
         console.error("admin_qr_cards_failed:", err);
-        if (!res.headersSent) {
-          res.status(500).json({ error: "admin_qr_cards_failed" });
-        }
+        if (!res.headersSent) res.status(500).json({ error: "admin_qr_cards_failed" });
       }
     }
   );
+
+
+
+  router.patch(
+    "/admin/attendance-records/:recordId",
+    simpleAuth,
+    requireRole("admin"),
+    async (req, res) => {
+      try {
+        const recordId = Number(req.params.recordId);
+        if (!recordId || Number.isNaN(recordId)) {
+          return res.status(400).json({ error: "invalid_record_id" });
+        }
+
+        const { action } = req.body || {};
+        if (!action) {
+          return res.status(400).json({ error: "action_required" });
+        }
+
+        const [record] = await db
+          .select()
+          .from(attendanceRecords)
+          .where(eq(attendanceRecords.id, recordId));
+
+        if (!record) {
+          return res.status(404).json({ error: "record_not_found" });
+        }
+
+        const now = new Date();
+
+        const parseDateOrNull = (v) => {
+          if (v === null || v === undefined || v === "") return null;
+          const d = new Date(v);
+          return Number.isNaN(d.getTime()) ? null : d;
+        };
+
+        // Build patch
+        const patch = {};
+
+        if (action === "set_status") {
+          const status = String(req.body?.status || "").trim();
+          if (!status) return res.status(400).json({ error: "status_required" });
+          patch.status = status;
+        }
+
+        else if (action === "force_checkout") {
+          // If already checked out, we overwrite (admin fix)
+          const checkOutAt = parseDateOrNull(req.body?.checkOutAt) || now;
+
+          // Basic sanity: checkout should not be before checkin
+          const ci = record.checkInAt ? new Date(record.checkInAt) : null;
+          if (ci && checkOutAt.getTime() < ci.getTime()) {
+            return res.status(400).json({ error: "checkout_before_checkin" });
+          }
+
+          patch.checkOutAt = checkOutAt;
+
+          // optional audit fields update
+          const ipAddress =
+            req.headers["x-forwarded-for"]?.toString().split(",")[0] ||
+            req.ip ||
+            null;
+          const userAgent = req.headers["user-agent"] || null;
+
+          patch.ipAddress = ipAddress || record.ipAddress || null;
+          patch.userAgent = userAgent || record.userAgent || null;
+          patch.deviceId = req.body?.deviceId || record.deviceId || null;
+        }
+
+        else if (action === "reopen_session") {
+          // Make it an open session again
+          patch.checkOutAt = null;
+          patch.checkOutLat = null;
+          patch.checkOutLng = null;
+          patch.checkOutAccuracy = null;
+          patch.distanceFromCenterCheckoutMeters = null;
+        }
+
+        else if (action === "set_times") {
+          const checkInAt = parseDateOrNull(req.body?.checkInAt);
+          const checkOutAt = parseDateOrNull(req.body?.checkOutAt);
+
+          if (!checkInAt && !checkOutAt && req.body?.checkOutAt !== null) {
+            return res.status(400).json({ error: "checkInAt_or_checkOutAt_required" });
+          }
+
+          const ci = checkInAt || (record.checkInAt ? new Date(record.checkInAt) : null);
+          const co = (req.body?.checkOutAt === null) ? null : (checkOutAt || (record.checkOutAt ? new Date(record.checkOutAt) : null));
+
+          if (ci && co && co.getTime() < ci.getTime()) {
+            return res.status(400).json({ error: "checkout_before_checkin" });
+          }
+
+          if (checkInAt) patch.checkInAt = checkInAt;
+          if (req.body?.checkOutAt === null) patch.checkOutAt = null;
+          else if (checkOutAt) patch.checkOutAt = checkOutAt;
+        }
+
+        else if (action === "set_center") {
+          const centerId = Number(req.body?.centerId);
+          if (!centerId || Number.isNaN(centerId)) {
+            return res.status(400).json({ error: "invalid_center_id" });
+          }
+
+          const [center] = await db
+            .select()
+            .from(centers)
+            .where(eq(centers.id, centerId));
+
+          if (!center) return res.status(400).json({ error: "center_not_found" });
+
+          patch.centerId = centerId;
+        }
+
+        else if (action === "set_checkin_location") {
+          // optional: admin can fill check-in telemetry
+          const lat = req.body?.lat != null ? Number(req.body.lat) : null;
+          const lng = req.body?.lng != null ? Number(req.body.lng) : null;
+          if (lat == null || lng == null || Number.isNaN(lat) || Number.isNaN(lng)) {
+            return res.status(400).json({ error: "lat_lng_required" });
+          }
+          patch.checkInLat = lat;
+          patch.checkInLng = lng;
+          patch.checkInAccuracy =
+            req.body?.accuracy != null ? Number(req.body.accuracy) : record.checkInAccuracy;
+        }
+
+        else {
+          return res.status(400).json({ error: "unsupported_action" });
+        }
+
+        // Ensure something is changing
+        if (Object.keys(patch).length === 0) {
+          return res.status(400).json({ error: "no_changes" });
+        }
+
+        await db
+          .update(attendanceRecords)
+          .set(patch)
+          .where(eq(attendanceRecords.id, recordId));
+
+        const [updated] = await db
+          .select()
+          .from(attendanceRecords)
+          .where(eq(attendanceRecords.id, recordId));
+
+        return res.json({
+          ok: true,
+          action,
+          record: updated,
+          serverTimeIST: formatISTDateTime(now),
+        });
+      } catch (err) {
+        console.error("admin_modify_attendance_record_failed:", err);
+        return res.status(500).json({ error: "admin_modify_attendance_record_failed" });
+      }
+    }
+  );
+
+  router.delete(
+    "/admin/attendance-records/:recordId",
+    simpleAuth,
+    requireRole("admin"),
+    async (req, res) => {
+      try {
+        const recordId = Number(req.params.recordId);
+        if (!recordId || Number.isNaN(recordId)) {
+          return res.status(400).json({ error: "invalid_record_id" });
+        }
+
+        const [record] = await db
+          .select()
+          .from(attendanceRecords)
+          .where(eq(attendanceRecords.id, recordId));
+
+        if (!record) {
+          return res.status(404).json({ error: "record_not_found" });
+        }
+
+        await db.delete(attendanceRecords).where(eq(attendanceRecords.id, recordId));
+
+        return res.json({ ok: true, deletedId: recordId });
+      } catch (err) {
+        console.error("admin_delete_attendance_record_failed:", err);
+        return res.status(500).json({ error: "admin_delete_attendance_record_failed" });
+      }
+    }
+  );
+
 
   return router;
 }
