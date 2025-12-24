@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import {
   Dialog,
   DialogContent,
@@ -33,12 +33,10 @@ import {
   Users,
   CalendarCheck,
   Percent,
-  MapPin,
   FileDown,
   FileUp,
   Plus,
   Trash2,
-  Compass,
   BarChart2,
   QrCode,
   Pencil,
@@ -47,6 +45,24 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { buildUrl } from "@/lib/queryClient";
+
+/* ──────────────────────────────────────────────────────────────
+   Grade list (used everywhere)
+────────────────────────────────────────────────────────────── */
+const GRADE_OPTIONS = [
+  "1st",
+  "2nd",
+  "3rd",
+  "4th",
+  "5th",
+  "6th",
+  "7th",
+  "8th",
+  "9th",
+  "10th",
+  "11th",
+  "12th",
+];
 
 /* ──────────────────────────────────────────────────────────────
    Small helpers
@@ -76,6 +92,26 @@ function parseLocalInputToISO(value) {
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return null;
   return d.toISOString();
+}
+
+function pickStudentPhone(obj) {
+  return (
+    obj?.studentPhoneNumber ||
+    obj?.phoneNumber ||
+    obj?.studentPhone ||
+    obj?.mobile ||
+    null
+  );
+}
+
+function pickParentPhone(obj) {
+  return (
+    obj?.parentPhoneNumber ||
+    obj?.parentNumber ||
+    obj?.guardianPhoneNumber ||
+    obj?.guardianPhone ||
+    null
+  );
 }
 
 /* ──────────────────────────────────────────────────────────────
@@ -230,6 +266,9 @@ function AttendanceEditor({ record, onClose, onSaved, getAuthHeaders }) {
     }
   }
 
+  const studentPhone = pickStudentPhone(record);
+  const parentPhone = pickParentPhone(record);
+
   return (
     <div className="space-y-3">
       <div className="flex items-start justify-between gap-2">
@@ -239,7 +278,12 @@ function AttendanceEditor({ record, onClose, onSaved, getAuthHeaders }) {
             Edit Attendance Record
           </div>
           <div className="text-[11px] text-muted-foreground">
-            Record #{record.id} • {record.userName} • Grade {record.userGrade || "N/A"}
+            Record #{record.id} • {record.userName} • Grade{" "}
+            {record.userGrade || "N/A"}
+          </div>
+          <div className="text-[11px] text-muted-foreground">
+            Student Phone: {studentPhone || "—"} • Parent Phone:{" "}
+            {parentPhone || "—"}
           </div>
         </div>
         <Button size="icon" variant="ghost" onClick={onClose}>
@@ -250,11 +294,17 @@ function AttendanceEditor({ record, onClose, onSaved, getAuthHeaders }) {
       {/* Status */}
       <div className="grid gap-2 md:grid-cols-3">
         <div className="md:col-span-2">
-          <Input
-            placeholder="Status (present/late/absent...)"
-            value={status}
-            onChange={(e) => setStatus(e.target.value)}
-          />
+          <div className="text-[11px] text-muted-foreground">Status</div>
+          <Select value={status} onValueChange={setStatus}>
+            <SelectTrigger>
+              <SelectValue placeholder="Select status" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="present">Present</SelectItem>
+              <SelectItem value="late">Late</SelectItem>
+              <SelectItem value="absent">Absent</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
         <Button variant="outline" onClick={handleSetStatus} disabled={saving}>
           <Save className="w-4 h-4 mr-2" />
@@ -299,26 +349,26 @@ function AttendanceEditor({ record, onClose, onSaved, getAuthHeaders }) {
 
       {message && (
         <div
-          className={`text-[11px] ${message.type === "success" ? "text-emerald-600" : "text-red-600"
-            }`}
+          className={`text-[11px] ${
+            message.type === "success" ? "text-emerald-600" : "text-red-600"
+          }`}
         >
           {message.text}
         </div>
       )}
     </div>
   );
-
 }
 
 /* ──────────────────────────────────────────────────────────────
-   QR Cards panel with filters
+   QR Cards panel with filters (NO Center filters)
+   ✅ Grade is now a Select dropdown
 ────────────────────────────────────────────────────────────── */
 function QrCardsPanel({ getAuthHeaders }) {
   const [filters, setFilters] = useState({
     today: false,
     dateFrom: "",
     dateTo: "",
-    centerId: "",
     grade: "",
     rollNumber: "",
     email: "",
@@ -333,7 +383,6 @@ function QrCardsPanel({ getAuthHeaders }) {
     if (filters.today) q.set("today", "1");
     if (!filters.today && filters.dateFrom) q.set("dateFrom", filters.dateFrom);
     if (!filters.today && filters.dateTo) q.set("dateTo", filters.dateTo);
-    if (filters.centerId) q.set("centerId", filters.centerId);
     if (filters.grade) q.set("grade", filters.grade);
     if (filters.rollNumber) q.set("rollNumber", filters.rollNumber);
     if (filters.email) q.set("email", filters.email);
@@ -367,8 +416,8 @@ function QrCardsPanel({ getAuthHeaders }) {
       const suffix = filters.today
         ? "today"
         : filters.dateFrom || filters.dateTo
-          ? `${filters.dateFrom || "x"}_to_${filters.dateTo || "x"}`
-          : "all";
+        ? `${filters.dateFrom || "x"}_to_${filters.dateTo || "x"}`
+        : "all";
 
       a.download = `student_qr_cards_${suffix}.pdf`;
       document.body.appendChild(a);
@@ -402,8 +451,7 @@ function QrCardsPanel({ getAuthHeaders }) {
         </div>
 
         <p className="text-[11px] text-muted-foreground">
-          Filter QR cards by today/date range, email, roll number, grade, centerId,
-          etc.
+          Filter QR cards by today/date range, email, roll number, grade, etc.
         </p>
 
         <div className="grid gap-2 md:grid-cols-2">
@@ -422,34 +470,49 @@ function QrCardsPanel({ getAuthHeaders }) {
             min="1"
             max="500"
             value={filters.limit}
-            onChange={(e) => setFilters((p) => ({ ...p, limit: e.target.value }))}
+            onChange={(e) =>
+              setFilters((p) => ({ ...p, limit: e.target.value }))
+            }
           />
 
           <Input
             type="date"
             disabled={filters.today}
             value={filters.dateFrom}
-            onChange={(e) => setFilters((p) => ({ ...p, dateFrom: e.target.value }))}
+            onChange={(e) =>
+              setFilters((p) => ({ ...p, dateFrom: e.target.value }))
+            }
             placeholder="Date From"
           />
           <Input
             type="date"
             disabled={filters.today}
             value={filters.dateTo}
-            onChange={(e) => setFilters((p) => ({ ...p, dateTo: e.target.value }))}
+            onChange={(e) =>
+              setFilters((p) => ({ ...p, dateTo: e.target.value }))
+            }
             placeholder="Date To"
           />
 
-          <Input
-            placeholder="Center ID"
-            value={filters.centerId}
-            onChange={(e) => setFilters((p) => ({ ...p, centerId: e.target.value }))}
-          />
-          <Input
-            placeholder="Grade"
-            value={filters.grade}
-            onChange={(e) => setFilters((p) => ({ ...p, grade: e.target.value }))}
-          />
+          {/* ✅ Grade dropdown */}
+          <Select
+            value={filters.grade || "all"}
+            onValueChange={(value) =>
+              setFilters((p) => ({ ...p, grade: value === "all" ? "" : value }))
+            }
+          >
+            <SelectTrigger>
+              <SelectValue placeholder="Grade (optional)" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Grades</SelectItem>
+              {GRADE_OPTIONS.map((g) => (
+                <SelectItem key={g} value={g}>
+                  {g}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
 
           <Input
             placeholder="Roll Number"
@@ -461,14 +524,18 @@ function QrCardsPanel({ getAuthHeaders }) {
           <Input
             placeholder="Email"
             value={filters.email}
-            onChange={(e) => setFilters((p) => ({ ...p, email: e.target.value }))}
+            onChange={(e) =>
+              setFilters((p) => ({ ...p, email: e.target.value }))
+            }
           />
 
           <Input
             className="md:col-span-2"
             placeholder="Search (name/email contains)"
             value={filters.search}
-            onChange={(e) => setFilters((p) => ({ ...p, search: e.target.value }))}
+            onChange={(e) =>
+              setFilters((p) => ({ ...p, search: e.target.value }))
+            }
           />
         </div>
       </CardContent>
@@ -480,8 +547,6 @@ function QrCardsPanel({ getAuthHeaders }) {
    Main AdminDashboard
 ────────────────────────────────────────────────────────────── */
 export default function AdminDashboard() {
-  const editorRef = useRef(null);
-
   const { user, logout } = useAuth();
   const [_, setLocation] = useLocation();
 
@@ -496,15 +561,14 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Attendance report state
+  // Attendance report state (NO centerId)
   const [reportFilters, setReportFilters] = useState({
-    centerId: "",
-    grade: "",
+    grade: "", // ✅ will be driven by dropdown
     status: "",
     dateFrom: "",
     dateTo: "",
     page: 1,
-    pageSize: 50,
+    pageSize: 100,
   });
   const [reportRows, setReportRows] = useState([]);
   const [reportMeta, setReportMeta] = useState(null);
@@ -512,14 +576,15 @@ export default function AdminDashboard() {
   const [reportError, setReportError] = useState(null);
   const [reportCsvLoading, setReportCsvLoading] = useState(false);
 
-  // Student management state
+  // Student management state (NO centerId)
   const [studentForm, setStudentForm] = useState({
     name: "",
     email: "",
     password: "",
-    centerId: "",
-    grade: "",
+    grade: "", // ✅ dropdown
     rollNumber: "",
+    phoneNumber: "",
+    parentPhoneNumber: "",
   });
   const [studentAddLoading, setStudentAddLoading] = useState(false);
   const [studentAddMessage, setStudentAddMessage] = useState(null);
@@ -535,25 +600,12 @@ export default function AdminDashboard() {
   const [importLoading, setImportLoading] = useState(false);
   const [importResult, setImportResult] = useState(null);
 
-  // Center geofence state
-  const [centerForm, setCenterForm] = useState({
-    centerId: "",
-    lat: "",
-    lng: "",
-    radiusMeters: "",
-  });
-  const [centerUpdateLoading, setCenterUpdateLoading] = useState(false);
-  const [centerUpdateMessage, setCenterUpdateMessage] = useState(null);
-
-  // NEW: record editor selection
+  // Record editor selection
   const [editingRecord, setEditingRecord] = useState(null);
 
-
   const openEditor = useCallback((rec) => {
-  setEditingRecord(rec);
-}, []);
-
-
+    setEditingRecord(rec);
+  }, []);
 
   // header-based auth
   const getAuthHeaders = useCallback(() => {
@@ -629,24 +681,24 @@ export default function AdminDashboard() {
 
   const { totalStudents, presentToday, attendanceRate } = stats;
 
-  // Grade options
+  // Grade options for table filter (based on data; fallback to constants)
   const gradeOptions = useMemo(() => {
     const set = new Set();
     records.forEach((r) => {
       if (r.userGrade && r.userGrade !== "N/A") set.add(r.userGrade);
     });
-    return Array.from(set).sort();
+    const arr = Array.from(set);
+    return arr.length ? arr : [...GRADE_OPTIONS];
   }, [records]);
 
   // Filter main table
   const filteredRecords = useMemo(() => {
     const search = searchTerm.trim().toLowerCase();
     return records.filter((record) => {
-      const matchesSearch =
-        !search ||
-        record.userName?.toLowerCase().includes(search) ||
-        record.userId?.toLowerCase().includes(search);
+      const name = (record.userName || "").toLowerCase();
+      const id = String(record.userId ?? "").toLowerCase();
 
+      const matchesSearch = !search || name.includes(search) || id.includes(search);
       const matchesGrade = gradeFilter === "all" || record.userGrade === gradeFilter;
 
       return matchesSearch && matchesGrade;
@@ -664,17 +716,18 @@ export default function AdminDashboard() {
       status: row.status,
       checkInAt: row.checkInAt,
       checkOutAt: row.checkOutAt,
+      studentPhoneNumber: pickStudentPhone(row),
+      parentPhoneNumber: pickParentPhone(row),
     };
   }, []);
 
-  // Attendance report
+  // Attendance report (NO centerId query param)
   async function handleGenerateReport(pageOverride) {
     if (!user) return;
 
-    const { centerId, grade, status, dateFrom, dateTo, page, pageSize } = reportFilters;
+    const { grade, status, dateFrom, dateTo, page, pageSize } = reportFilters;
 
     const query = new URLSearchParams();
-    if (centerId) query.set("centerId", centerId);
     if (grade) query.set("grade", grade);
     if (status) query.set("status", status);
     if (dateFrom) query.set("dateFrom", dateFrom);
@@ -715,10 +768,9 @@ export default function AdminDashboard() {
   async function handleExportReportCsv() {
     if (!user) return;
 
-    const { centerId, grade, status, dateFrom, dateTo } = reportFilters;
+    const { grade, status, dateFrom, dateTo } = reportFilters;
 
     const query = new URLSearchParams();
-    if (centerId) query.set("centerId", centerId);
     if (grade) query.set("grade", grade);
     if (status) query.set("status", status);
     if (dateFrom) query.set("dateFrom", dateFrom);
@@ -761,11 +813,7 @@ export default function AdminDashboard() {
     try {
       setStudentsExportLoading(true);
 
-      const centerId = reportFilters.centerId || "";
-      const query = new URLSearchParams();
-      if (centerId) query.set("centerId", centerId);
-
-      const url = buildUrl(`/admin/students/export?${query.toString()}`);
+      const url = buildUrl(`/admin/students/export`);
 
       const res = await fetch(url, {
         credentials: "include",
@@ -780,7 +828,7 @@ export default function AdminDashboard() {
       const href = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = href;
-      a.download = `students_${centerId || "all"}.csv`;
+      a.download = `students_all.csv`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -795,12 +843,13 @@ export default function AdminDashboard() {
 
   async function handleAddStudent(e) {
     e.preventDefault();
-    const { name, email, password, centerId, grade, rollNumber } = studentForm;
+    const { name, email, password, grade, rollNumber, phoneNumber, parentPhoneNumber } =
+      studentForm;
 
-    if (!name || !email || !password || !centerId) {
+    if (!name || !email || !password) {
       setStudentAddMessage({
         type: "error",
-        text: "Name, email, password and centerId are required.",
+        text: "Name, email, and password are required.",
       });
       return;
     }
@@ -820,9 +869,10 @@ export default function AdminDashboard() {
           name,
           email,
           password,
-          centerId: Number(centerId),
           grade: grade || undefined,
           rollNumber: rollNumber || undefined,
+          phoneNumber: phoneNumber || undefined,
+          parentPhoneNumber: parentPhoneNumber || undefined,
         }),
       });
 
@@ -838,12 +888,12 @@ export default function AdminDashboard() {
         name: "",
         email: "",
         password: "",
-        centerId: "",
         grade: "",
         rollNumber: "",
+        phoneNumber: "",
+        parentPhoneNumber: "",
       });
 
-      // refresh stats/records
       await reloadAdminData();
     } catch (err) {
       console.error("Failed to add student:", err);
@@ -930,9 +980,11 @@ export default function AdminDashboard() {
       const json = await res.json();
       setImportResult({
         type: "success",
-        text: `Imported successfully. Users: ${json.summary?.createdUsers ?? 0}, Students: ${json.summary?.createdStudents ?? 0
-          }, Skipped: ${json.summary?.skippedExisting ?? 0}, Errors: ${json.summary?.rowsWithErrors ?? 0
-          }`,
+        text: `Imported successfully. Users: ${json.summary?.createdUsers ?? 0}, Students: ${
+          json.summary?.createdStudents ?? 0
+        }, Skipped: ${json.summary?.skippedExisting ?? 0}, Errors: ${
+          json.summary?.rowsWithErrors ?? 0
+        }`,
         raw: json,
       });
 
@@ -948,60 +1000,6 @@ export default function AdminDashboard() {
       });
     } finally {
       setImportLoading(false);
-    }
-  }
-
-  async function handleUpdateCenter(e) {
-    e.preventDefault();
-    const { centerId, lat, lng, radiusMeters } = centerForm;
-
-    if (!centerId || !lat || !lng || !radiusMeters) {
-      setCenterUpdateMessage({
-        type: "error",
-        text: "Center ID, latitude, longitude and radius are required.",
-      });
-      return;
-    }
-
-    try {
-      setCenterUpdateLoading(true);
-      setCenterUpdateMessage(null);
-
-      const res = await fetch(
-        buildUrl(`/admin/centers/${encodeURIComponent(centerId)}/location`),
-        {
-          method: "PATCH",
-          credentials: "include",
-          headers: {
-            "Content-Type": "application/json",
-            ...getAuthHeaders(),
-          },
-          body: JSON.stringify({
-            lat: Number(lat),
-            lng: Number(lng),
-            radiusMeters: Number(radiusMeters),
-          }),
-        }
-      );
-
-      if (!res.ok) {
-        const text = (await res.text()) || res.statusText;
-        throw new Error(text);
-      }
-
-      await res.json();
-      setCenterUpdateMessage({
-        type: "success",
-        text: "Center geofence updated successfully.",
-      });
-    } catch (err) {
-      console.error("Failed to update center:", err);
-      setCenterUpdateMessage({
-        type: "error",
-        text: "Failed to update center coordinates. Please verify values.",
-      });
-    } finally {
-      setCenterUpdateLoading(false);
     }
   }
 
@@ -1097,6 +1095,8 @@ export default function AdminDashboard() {
                   onChange={(e) => setSearchTerm(e.target.value)}
                 />
               </div>
+
+              {/* ✅ Grade dropdown already */}
               <Select value={gradeFilter} onValueChange={setGradeFilter}>
                 <SelectTrigger className="w-[160px]">
                   <SelectValue placeholder="Filter Grade" />
@@ -1108,17 +1108,15 @@ export default function AdminDashboard() {
                       {grade}
                     </SelectItem>
                   ))}
-                  {gradeOptions.length === 0 && (
-                    <SelectItem value="none" disabled>
-                      No grade data
-                    </SelectItem>
-                  )}
                 </SelectContent>
               </Select>
             </div>
           </div>
 
-          <Dialog open={!!editingRecord} onOpenChange={(open) => !open && setEditingRecord(null)}>
+          <Dialog
+            open={!!editingRecord}
+            onOpenChange={(open) => !open && setEditingRecord(null)}
+          >
             <DialogContent className="max-w-2xl">
               <DialogHeader>
                 <DialogTitle>Edit Attendance</DialogTitle>
@@ -1140,7 +1138,6 @@ export default function AdminDashboard() {
             </DialogContent>
           </Dialog>
 
-
           <Card>
             {loading ? (
               <div className="py-10 text-center text-muted-foreground">
@@ -1155,11 +1152,12 @@ export default function AdminDashboard() {
                     <TableRow>
                       <TableHead>Student Name</TableHead>
                       <TableHead>Grade</TableHead>
+                      <TableHead>Student Phone</TableHead>
+                      <TableHead>Parent Phone</TableHead>
                       <TableHead>Date</TableHead>
                       <TableHead>In</TableHead>
                       <TableHead>Out</TableHead>
                       <TableHead>Status</TableHead>
-                      
                       <TableHead className="text-right">Actions</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -1167,7 +1165,7 @@ export default function AdminDashboard() {
                     {filteredRecords.length === 0 ? (
                       <TableRow>
                         <TableCell
-                          colSpan={8}
+                          colSpan={9}
                           className="text-center py-8 text-muted-foreground"
                         >
                           No records found matching your filters.
@@ -1190,7 +1188,12 @@ export default function AdminDashboard() {
                           ? format(checkOutDate, "hh:mm a")
                           : "—";
 
-                        const statusText = (record.status || "").toString().toUpperCase();
+                        const statusText = (record.status || "")
+                          .toString()
+                          .toUpperCase();
+
+                        const studentPhone = pickStudentPhone(record);
+                        const parentPhone = pickParentPhone(record);
 
                         return (
                           <TableRow key={record.id}>
@@ -1207,6 +1210,8 @@ export default function AdminDashboard() {
                                 {record.userGrade || "N/A"}
                               </Badge>
                             </TableCell>
+                            <TableCell className="text-xs">{studentPhone || "—"}</TableCell>
+                            <TableCell className="text-xs">{parentPhone || "—"}</TableCell>
                             <TableCell>{dateStr}</TableCell>
                             <TableCell>{checkInStr}</TableCell>
                             <TableCell>{checkOutStr}</TableCell>
@@ -1215,14 +1220,13 @@ export default function AdminDashboard() {
                                 {statusText || "—"}
                               </Badge>
                             </TableCell>
-                            
+
                             <TableCell className="text-right">
                               <div className="flex justify-end gap-2">
                                 <Button
                                   size="sm"
                                   variant="outline"
                                   onClick={() => openEditor(record)}
-
                                 >
                                   <Pencil className="w-4 h-4 mr-1" />
                                   Edit
@@ -1291,29 +1295,39 @@ export default function AdminDashboard() {
                     setReportFilters((p) => ({ ...p, dateTo: e.target.value }))
                   }
                 />
-                <Input
-                  type="number"
-                  min="1"
-                  placeholder="Center ID"
-                  value={reportFilters.centerId}
-                  onChange={(e) =>
-                    setReportFilters((p) => ({ ...p, centerId: e.target.value }))
+
+                {/* ✅ Grade is now dropdown */}
+                <Select
+                  value={reportFilters.grade || "all"}
+                  onValueChange={(value) =>
+                    setReportFilters((p) => ({
+                      ...p,
+                      grade: value === "all" ? "" : value,
+                      page: 1,
+                    }))
                   }
-                />
-                <Input
-                  placeholder="Grade (optional)"
-                  value={reportFilters.grade}
-                  onChange={(e) =>
-                    setReportFilters((p) => ({ ...p, grade: e.target.value }))
-                  }
-                />
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Grade (optional)" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Grades</SelectItem>
+                    {GRADE_OPTIONS.map((g) => (
+                      <SelectItem key={g} value={g}>
+                        {g}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+
                 <Input
                   placeholder="Status (present/late...)"
                   value={reportFilters.status}
                   onChange={(e) =>
-                    setReportFilters((p) => ({ ...p, status: e.target.value }))
+                    setReportFilters((p) => ({ ...p, status: e.target.value, page: 1 }))
                   }
                 />
+
                 <Input
                   type="number"
                   min="1"
@@ -1323,13 +1337,16 @@ export default function AdminDashboard() {
                   onChange={(e) =>
                     setReportFilters((p) => ({
                       ...p,
-                      pageSize: e.target.value || 50,
+                      pageSize: Number(e.target.value || 100),
+                      page: 1,
                     }))
                   }
                 />
               </div>
 
-              {reportError && <div className="text-xs text-red-600">{reportError}</div>}
+              {reportError && (
+                <div className="text-xs text-red-600">{reportError}</div>
+              )}
 
               {reportMeta && (
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -1378,7 +1395,8 @@ export default function AdminDashboard() {
                         <TableRow>
                           <TableHead>Student</TableHead>
                           <TableHead>Grade</TableHead>
-                          <TableHead>Center</TableHead>
+                          <TableHead>Student Phone</TableHead>
+                          <TableHead>Parent Phone</TableHead>
                           <TableHead>Date</TableHead>
                           <TableHead>In</TableHead>
                           <TableHead>Out</TableHead>
@@ -1390,6 +1408,9 @@ export default function AdminDashboard() {
                         {reportRows.map((row) => {
                           const inDate = safeDate(row.checkInAt);
                           const outDate = safeDate(row.checkOutAt);
+
+                          const studentPhone = pickStudentPhone(row);
+                          const parentPhone = pickParentPhone(row);
 
                           return (
                             <TableRow key={row.id}>
@@ -1403,13 +1424,10 @@ export default function AdminDashboard() {
                               </TableCell>
                               <TableCell>{row.grade || "N/A"}</TableCell>
                               <TableCell className="text-xs">
-                                <div className="flex flex-col">
-                                  <span>{row.centerName || "—"}</span>
-                                  <span className="text-[10px] text-muted-foreground">
-                                    {row.centerCode || ""}{" "}
-                                    {row.centerId ? `(#${row.centerId})` : ""}
-                                  </span>
-                                </div>
+                                {studentPhone || "—"}
+                              </TableCell>
+                              <TableCell className="text-xs">
+                                {parentPhone || "—"}
                               </TableCell>
                               <TableCell>
                                 {inDate ? format(inDate, "MMM dd, yyyy") : "—"}
@@ -1421,7 +1439,10 @@ export default function AdminDashboard() {
                                 {outDate ? format(outDate, "hh:mm a") : "—"}
                               </TableCell>
                               <TableCell>
-                                <Badge variant="outline" className="text-xs font-normal">
+                                <Badge
+                                  variant="outline"
+                                  className="text-xs font-normal"
+                                >
                                   {(row.status || "").toUpperCase()}
                                 </Badge>
                               </TableCell>
@@ -1430,8 +1451,9 @@ export default function AdminDashboard() {
                                 <Button
                                   size="sm"
                                   variant="outline"
-                                  onClick={() => openEditor(reportRowToEditorRecord(row))}
-
+                                  onClick={() =>
+                                    openEditor(reportRowToEditorRecord(row))
+                                  }
                                 >
                                   <Pencil className="w-4 h-4 mr-1" />
                                   Edit
@@ -1468,15 +1490,16 @@ export default function AdminDashboard() {
                   </Button>
                 </div>
 
-                <p className="text-[11px] text-muted-foreground">
-                  Export all students (or filtered by centerId) with their stored passwords.
-                </p>
+                <p className="text-[11px] text-muted-foreground">Export all students.</p>
 
                 {/* QR Cards with filters */}
                 <QrCardsPanel getAuthHeaders={getAuthHeaders} />
 
                 {/* Import CSV */}
-                <form className="border-t pt-3 mt-3 space-y-2" onSubmit={handleImportCsv}>
+                <form
+                  className="border-t pt-3 mt-3 space-y-2"
+                  onSubmit={handleImportCsv}
+                >
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2 text-xs font-medium">
                       <FileUp className="w-4 h-4 text-slate-700" />
@@ -1491,17 +1514,25 @@ export default function AdminDashboard() {
                   </div>
                   <p className="text-[11px] text-muted-foreground">
                     Expected columns:{" "}
-                    <code>name,email,password,role,centerCode,grade,rollNumber</code>
+                    <code>
+                      name,email,password,role,grade,rollNumber,phoneNumber,parentPhoneNumber
+                    </code>
                   </p>
-                  <Button type="submit" size="xs" className="w-full mt-1" disabled={importLoading}>
+                  <Button
+                    type="submit"
+                    size="xs"
+                    className="w-full mt-1"
+                    disabled={importLoading}
+                  >
                     {importLoading ? "Importing…" : "Import Students"}
                   </Button>
                   {importResult && (
                     <p
-                      className={`text-[11px] mt-1 ${importResult.type === "success"
-                        ? "text-emerald-600"
-                        : "text-red-600"
-                        }`}
+                      className={`text-[11px] mt-1 ${
+                        importResult.type === "success"
+                          ? "text-emerald-600"
+                          : "text-red-600"
+                      }`}
                     >
                       {importResult.text}
                     </p>
@@ -1541,22 +1572,31 @@ export default function AdminDashboard() {
                       setStudentForm((p) => ({ ...p, password: e.target.value }))
                     }
                   />
-                  <Input
-                    type="number"
-                    placeholder="Center ID"
-                    value={studentForm.centerId}
-                    onChange={(e) =>
-                      setStudentForm((p) => ({ ...p, centerId: e.target.value }))
-                    }
-                  />
+
                   <div className="grid grid-cols-2 gap-2">
-                    <Input
-                      placeholder="Grade (optional)"
-                      value={studentForm.grade}
-                      onChange={(e) =>
-                        setStudentForm((p) => ({ ...p, grade: e.target.value }))
+                    {/* ✅ Grade dropdown */}
+                    <Select
+                      value={studentForm.grade || "none"}
+                      onValueChange={(value) =>
+                        setStudentForm((p) => ({
+                          ...p,
+                          grade: value === "none" ? "" : value,
+                        }))
                       }
-                    />
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Grade (optional)" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">No Grade</SelectItem>
+                        {GRADE_OPTIONS.map((g) => (
+                          <SelectItem key={g} value={g}>
+                            {g}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+
                     <Input
                       placeholder="Roll no. (optional)"
                       value={studentForm.rollNumber}
@@ -1568,15 +1608,45 @@ export default function AdminDashboard() {
                       }
                     />
                   </div>
-                  <Button type="submit" size="sm" className="w-full" disabled={studentAddLoading}>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <Input
+                      placeholder="Student phone (optional)"
+                      value={studentForm.phoneNumber}
+                      onChange={(e) =>
+                        setStudentForm((p) => ({
+                          ...p,
+                          phoneNumber: e.target.value,
+                        }))
+                      }
+                    />
+                    <Input
+                      placeholder="Parent phone (optional)"
+                      value={studentForm.parentPhoneNumber}
+                      onChange={(e) =>
+                        setStudentForm((p) => ({
+                          ...p,
+                          parentPhoneNumber: e.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+
+                  <Button
+                    type="submit"
+                    size="sm"
+                    className="w-full"
+                    disabled={studentAddLoading}
+                  >
                     {studentAddLoading ? "Creating…" : "Create Student"}
                   </Button>
                   {studentAddMessage && (
                     <p
-                      className={`text-[11px] mt-1 ${studentAddMessage.type === "success"
-                        ? "text-emerald-600"
-                        : "text-red-600"
-                        }`}
+                      className={`text-[11px] mt-1 ${
+                        studentAddMessage.type === "success"
+                          ? "text-emerald-600"
+                          : "text-red-600"
+                      }`}
                     >
                       {studentAddMessage.text}
                     </p>
@@ -1590,7 +1660,9 @@ export default function AdminDashboard() {
               <CardContent className="p-4 space-y-3">
                 <div className="flex items-center gap-2">
                   <Trash2 className="w-4 h-4 text-red-600" />
-                  <h3 className="text-sm font-semibold text-red-700">Delete Student</h3>
+                  <h3 className="text-sm font-semibold text-red-700">
+                    Delete Student
+                  </h3>
                 </div>
                 <p className="text-[11px] text-muted-foreground">
                   Provide the <strong>student ID</strong> (not user ID).
@@ -1614,18 +1686,17 @@ export default function AdminDashboard() {
                 </div>
                 {studentDeleteMessage && (
                   <p
-                    className={`text-[11px] ${studentDeleteMessage.type === "success"
-                      ? "text-emerald-600"
-                      : "text-red-600"
-                      }`}
+                    className={`text-[11px] ${
+                      studentDeleteMessage.type === "success"
+                        ? "text-emerald-600"
+                        : "text-red-600"
+                    }`}
                   >
                     {studentDeleteMessage.text}
                   </p>
                 )}
               </CardContent>
             </Card>
-
-            
           </div>
         </section>
       </main>
