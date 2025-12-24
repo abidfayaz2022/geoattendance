@@ -1211,17 +1211,22 @@ export function createRouter() {
     }
   });
 
-  // QR cards route unchanged (no need for phone numbers here, unless you want)
-  router.get("/admin/students/qr-cards", simpleAuth, requireRole("admin"), async (req, res) => {
+ router.get(
+  "/admin/students/qr-cards",
+  simpleAuth,
+  requireRole("admin"),
+  async (req, res) => {
     try {
       const q = req.query || {};
 
+      // ---- Parse filters safely ----
       const centerId = q.centerId ? Number(q.centerId) : null;
       const grade = q.grade ? String(q.grade).trim() : null;
       const rollNumber = q.rollNumber ? String(q.rollNumber).trim() : null;
       const email = q.email ? String(q.email).toLowerCase().trim() : null;
       const search = q.search ? String(q.search).trim() : null;
 
+      // multi studentId support: ?studentId=1&studentId=2 or comma-separated
       const studentIdListRaw = []
         .concat(q.studentId || [])
         .flatMap((v) => String(v).split(","))
@@ -1233,11 +1238,14 @@ export function createRouter() {
       if (Number.isNaN(limit) || limit < 1) limit = 200;
       if (Number.isNaN(offset) || offset < 0) offset = 0;
 
-      const MAX_LIMIT = 500;
-      const MAX_OFFSET = 50_000;
+      // Hard caps for safety
+      const MAX_LIMIT = 500; // prevent someone generating 20k cards in one go
+      const MAX_OFFSET = 50_000; // sanity
       if (limit > MAX_LIMIT) limit = MAX_LIMIT;
       if (offset > MAX_OFFSET) offset = MAX_OFFSET;
 
+      // Date filtering (uses users.createdAt as “student added date”)
+      // today=1 overrides dateFrom/dateTo
       const today = q.today === "1" || q.today === "true";
       const dateFromStr = q.dateFrom ? String(q.dateFrom) : null;
       const dateToStr = q.dateTo ? String(q.dateTo) : null;
@@ -1247,7 +1255,14 @@ export function createRouter() {
 
       if (today) {
         const now = new Date();
-        const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+        const start = new Date(
+          now.getFullYear(),
+          now.getMonth(),
+          now.getDate(),
+          0,
+          0,
+          0
+        );
         const end = new Date(start);
         end.setDate(start.getDate() + 1);
         fromStart = start;
@@ -1256,40 +1271,78 @@ export function createRouter() {
         const fromDate = dateFromStr ? parseLocalDateOnly(dateFromStr) : null;
         const toDate = dateToStr ? parseLocalDateOnly(dateToStr) : null;
 
-        if (dateFromStr && !fromDate) return res.status(400).json({ error: "invalid_dateFrom" });
-        if (dateToStr && !toDate) return res.status(400).json({ error: "invalid_dateTo" });
+        if (dateFromStr && !fromDate)
+          return res.status(400).json({ error: "invalid_dateFrom" });
+        if (dateToStr && !toDate)
+          return res.status(400).json({ error: "invalid_dateTo" });
 
+        // If only one is provided, treat as single-day filter
         const base = fromDate || toDate;
-        const start = new Date(base.getFullYear(), base.getMonth(), base.getDate(), 0, 0, 0);
+        const start = new Date(
+          base.getFullYear(),
+          base.getMonth(),
+          base.getDate(),
+          0,
+          0,
+          0
+        );
         const end = new Date(start);
         end.setDate(start.getDate() + 1);
 
+        // If both provided, do a range (inclusive end-date)
         if (fromDate && toDate) {
-          fromStart = new Date(fromDate.getFullYear(), fromDate.getMonth(), fromDate.getDate(), 0, 0, 0);
-          toEnd = new Date(toDate.getFullYear(), toDate.getMonth(), toDate.getDate() + 1, 0, 0, 0);
+          fromStart = new Date(
+            fromDate.getFullYear(),
+            fromDate.getMonth(),
+            fromDate.getDate(),
+            0,
+            0,
+            0
+          );
+          toEnd = new Date(
+            toDate.getFullYear(),
+            toDate.getMonth(),
+            toDate.getDate() + 1,
+            0,
+            0,
+            0
+          );
         } else {
           fromStart = start;
           toEnd = end;
         }
       }
 
+      // ---- Build SQL conditions (push filters to DB) ----
       const conditions = [];
+
       if (centerId) conditions.push(eq(students.centerId, centerId));
       if (grade) conditions.push(eq(students.grade, grade));
       if (rollNumber) conditions.push(eq(students.rollNumber, rollNumber));
       if (email) conditions.push(eq(users.email, email));
-      if (studentIdListRaw.length) conditions.push(sql`${students.id} IN (${sql.join(studentIdListRaw)})`);
+
+      if (studentIdListRaw.length) {
+        // Drizzle MySQL: use sql`... IN (...)` if you don’t have inArray helper
+        conditions.push(sql`${students.id} IN (${sql.join(studentIdListRaw)})`);
+      }
+
       if (fromStart && toEnd) {
+        // IMPORTANT: students table has no createdAt, so filter on users.createdAt
         conditions.push(gte(users.createdAt, fromStart));
         conditions.push(lt(users.createdAt, toEnd));
       }
+
       if (search) {
+        // lightweight contains search on name/email
         const like = `%${search.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
-        conditions.push(sql`(${users.name} LIKE ${like} OR ${users.email} LIKE ${like})`);
+        conditions.push(
+          sql`(${users.name} LIKE ${like} OR ${users.email} LIKE ${like})`
+        );
       }
 
       const whereExpr = conditions.length ? and(...conditions) : undefined;
 
+      // ---- Query rows (paged) ----
       let query = db
         .select({
           studentId: students.id,
@@ -1301,7 +1354,7 @@ export function createRouter() {
           centerId: centers.id,
           centerName: centers.name,
           centerCode: centers.code,
-          addedAt: users.createdAt,
+          addedAt: users.createdAt, // for debugging/reporting
         })
         .from(students)
         .leftJoin(users, eq(students.userId, users.id))
@@ -1313,10 +1366,17 @@ export function createRouter() {
       if (whereExpr) query = query.where(whereExpr);
 
       const rows = await query;
-      if (!rows.length) return res.status(404).json({ error: "no_students_found" });
 
+      if (!rows.length) {
+        return res.status(404).json({ error: "no_students_found" });
+      }
+
+      // ---- PDF streaming response ----
       res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `attachment; filename="student_qr_cards_${Date.now()}.pdf"`);
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="student_qr_cards_${Date.now()}.pdf"`
+      );
 
       const doc = new PDFDocument({ size: "A4", margin: 36 });
       doc.pipe(res);
@@ -1329,7 +1389,12 @@ export function createRouter() {
       let colIndex = 0;
       let rowIndex = 0;
 
+      // Generate sequentially to avoid huge memory spikes
       for (const s of rows) {
+        // ✅ Safety: ensure numeric id
+        const sid = Number(s.studentId);
+        if (!sid || Number.isNaN(sid)) continue;
+
         if (rowIndex >= rowsPerPage) {
           doc.addPage();
           rowIndex = 0;
@@ -1360,6 +1425,66 @@ export function createRouter() {
             ellipsis: true,
           })
           .font("Helvetica");
+
+        doc
+          .fontSize(9)
+          .text(`Student ID: ${sid}`, x + 12, y + 72)
+          .text(`Roll: ${s.rollNumber || "-"}`, x + 12, y + 86)
+          .text(`Grade: ${s.grade || "-"}`, x + 12, y + 100);
+
+        // ✅ QR payload MUST be numeric-only because scan expects number
+        const qrPayload = String(sid);
+
+        const qrBuffer = await QRCode.toBuffer(qrPayload, {
+          width: 100,
+          margin: 1,
+        });
+
+        doc.image(qrBuffer, x + cardWidth - 120, y + 40, {
+          width: 90,
+          height: 90,
+        });
+
+        colIndex++;
+        if (colIndex >= cols) {
+          colIndex = 0;
+          rowIndex++;
+        }
+      }
+
+      doc.end();
+    } catch (err) {
+      console.error("admin_qr_cards_failed:", err);
+      if (!res.headersSent) res.status(500).json({ error: "admin_qr_cards_failed" });
+    }
+  }
+);
+
+
+  router.patch(
+    "/admin/attendance-records/:recordId",
+    simpleAuth,
+    requireRole("admin"),
+    async (req, res) => {
+      try {
+        const recordId = Number(req.params.recordId);
+        if (!recordId || Number.isNaN(recordId)) {
+          return res.status(400).json({ error: "invalid_record_id" });
+        }
+
+        const { action } = req.body || {};
+        if (!action) {
+          return res.status(400).json({ error: "action_required" });
+        }
+
+        const [record] = await db
+          .select()
+          .from(attendanceRecords)
+          .where(eq(attendanceRecords.id, recordId));
+
+        if (!record) {
+          return res.status(404).json({ error: "record_not_found" });
+        }
 
         doc
           .fontSize(9)
