@@ -538,70 +538,127 @@ export function createRouter() {
     }
   });
 
-  // ✅ CHANGE #1: include phoneNumber + parentPhoneNumber in admin recent attendance records fetch
-  router.get("/admin/attendance-records", simpleAuth, requireRole("admin"), async (_req, res) => {
+// ✅ UPDATED: Today (IST) attendance for ALL students (present + synthesized absent)
+// - Present entries first
+// - Absent entries are created in response (since absent is not stored in DB)
+router.get(
+  "/admin/attendance-records",
+  simpleAuth,
+  requireRole("admin"),
+  async (_req, res) => {
     try {
-      const rows = await db
-        .select({
-          id: attendanceRecords.id,
-          date: attendanceRecords.checkInAt,
-          status: attendanceRecords.status,
-          checkInLat: attendanceRecords.checkInLat,
-          checkInLng: attendanceRecords.checkInLng,
+      // ✅ "Today" in IST (uses your existing helper)
+      // Expected helper: getLocalDayRange(date) -> { start, end } as Date objects (UTC bounds for IST day)
+      const { start, end } = getLocalDayRange(new Date());
 
+      // 1) Fetch ALL students (with user + phone fields)
+      const allStudents = await db
+        .select({
           studentId: students.id,
           studentGrade: students.grade,
           rollNumber: students.rollNumber,
-
-          // ✅ NEW
           studentPhoneNumber: students.phoneNumber,
           parentPhoneNumber: students.parentPhoneNumber,
 
           userName: users.name,
+        })
+        .from(students)
+        .leftJoin(users, eq(students.userId, users.id));
+
+      // 2) Fetch TODAY's attendance records (IST day window)
+      // If a student has multiple records today, we keep the latest one.
+      const todayRows = await db
+        .select({
+          id: attendanceRecords.id,
+          studentId: attendanceRecords.studentId,
+          dateAttendance: attendanceRecords.checkInAt,
+          status: attendanceRecords.status,
+
+          checkInLat: attendanceRecords.checkInLat,
+          checkInLng: attendanceRecords.checkInLng,
+          checkInAccuracy: attendanceRecords.checkInAccuracy,
 
           checkOutAt: attendanceRecords.checkOutAt,
           checkOutLat: attendanceRecords.checkOutLat,
           checkOutLng: attendanceRecords.checkOutLng,
-          checkInAccuracy: attendanceRecords.checkInAccuracy,
           checkOutAccuracy: attendanceRecords.checkOutAccuracy,
         })
         .from(attendanceRecords)
-        .leftJoin(students, eq(attendanceRecords.studentId, students.id))
-        .leftJoin(users, eq(students.userId, users.id))
-        .orderBy(desc(attendanceRecords.checkInAt))
-        .limit(20);
+        .where(and(gte(attendanceRecords.checkInAt, start), lt(attendanceRecords.checkInAt, end)))
+        .orderBy(desc(attendanceRecords.checkInAt));
 
-      const mapped = rows.map((r) => ({
-        id: r.id,
-        userId: String(r.studentId ?? ""),
-        userName: r.userName || "Unknown",
-        userGrade: r.studentGrade || "N/A",
-        rollNumber: r.rollNumber || null,
+      // Build map: latest record per student for today
+      const todayByStudentId = new Map();
+      for (const r of todayRows) {
+        if (r.studentId == null) continue;
+        const sid = Number(r.studentId);
+        if (!todayByStudentId.has(sid)) todayByStudentId.set(sid, r); // first = latest (due to desc)
+      }
 
-        // ✅ NEW
-        studentPhoneNumber: r.studentPhoneNumber || null,
-        parentPhoneNumber: r.parentPhoneNumber || null,
+      // 3) Merge: present + synthesized absent
+      const mapped = allStudents.map((s) => {
+        const rec = todayByStudentId.get(Number(s.studentId));
 
-        date: r.date,
-        time: r.date != null ? formatISTDateTime(r.date) : null,
-        status: r.status || "present",
-        checkOutAt: r.checkOutAt,
-        checkOutTime: r.checkOutAt != null ? formatISTDateTime(r.checkOutAt) : null,
-        checkInAt: r.date,
-        location:
-          r.checkInLat != null && r.checkInLng != null ? { lat: Number(r.checkInLat), lng: Number(r.checkInLng) } : null,
-        checkOutLocation:
-          r.checkOutLat != null && r.checkOutLng != null ? { lat: Number(r.checkOutLat), lng: Number(r.checkOutLng) } : null,
-        checkInAccuracy: r.checkInAccuracy != null ? Number(r.checkInAccuracy) : null,
-        checkOutAccuracy: r.checkOutAccuracy != null ? Number(r.checkOutAccuracy) : null,
-      }));
+        const isPresent = !!rec;
+        const checkInAt = rec?.dateAttendance ?? null;
 
-      res.json(mapped);
+        return {
+          id: rec?.id ?? null, // absent has no DB id
+          userId: String(s.studentId ?? ""),
+          userName: s.userName || "Unknown",
+          userGrade: s.studentGrade || "N/A",
+          rollNumber: s.rollNumber ?? null,
+
+          // ✅ phones
+          studentPhoneNumber: s.studentPhoneNumber || null,
+          parentPhoneNumber: s.parentPhoneNumber || null,
+
+          // Use IST "today" date context; for absent, keep date but no time/checkin
+          date: checkInAt ?? start, // keeps today's date context for absent rows
+          time: checkInAt != null ? formatISTDateTime(checkInAt) : null,
+
+          status: isPresent ? (rec.status || "present") : "absent",
+
+          checkInAt: checkInAt,
+          location:
+            rec?.checkInLat != null && rec?.checkInLng != null
+              ? { lat: Number(rec.checkInLat), lng: Number(rec.checkInLng) }
+              : null,
+          checkInAccuracy: rec?.checkInAccuracy != null ? Number(rec.checkInAccuracy) : null,
+
+          checkOutAt: rec?.checkOutAt ?? null,
+          checkOutTime: rec?.checkOutAt != null ? formatISTDateTime(rec.checkOutAt) : null,
+          checkOutLocation:
+            rec?.checkOutLat != null && rec?.checkOutLng != null
+              ? { lat: Number(rec.checkOutLat), lng: Number(rec.checkOutLng) }
+              : null,
+          checkOutAccuracy: rec?.checkOutAccuracy != null ? Number(rec.checkOutAccuracy) : null,
+        };
+      });
+
+      // 4) Present first, then absents (optional: within groups sort by name)
+      mapped.sort((a, b) => {
+        const ap = a.status === "present" ? 0 : 1;
+        const bp = b.status === "present" ? 0 : 1;
+        if (ap !== bp) return ap - bp;
+        return (a.userName || "").localeCompare(b.userName || "");
+      });
+
+      res.json({
+        range: {
+          istDate: formatISTDateTime(start)?.split(",")?.[0] ?? null, // optional
+          start,
+          end,
+        },
+        data: mapped,
+      });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "admin_records_failed" });
     }
-  });
+  }
+);
+
 
   // (admin scan attendance stays same)
   router.post("/admin/attendance/scan", simpleAuth, requireRole("admin"), async (req, res) => {

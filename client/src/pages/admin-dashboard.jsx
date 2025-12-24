@@ -140,7 +140,12 @@ function AttendanceEditor({ record, onClose, onSaved, getAuthHeaders }) {
 
   if (!record) return null;
 
+  const isSyntheticAbsent = !record?.id; // ✅ absent row created client-side/back-end response
+  const studentPhone = pickStudentPhone(record);
+  const parentPhone = pickParentPhone(record);
+
   async function patch(action, body) {
+    if (!record?.id) throw new Error("No record id");
     const url = buildUrl(`/admin/attendance-records/${record.id}`);
     const res = await fetch(url, {
       method: "PATCH",
@@ -266,9 +271,6 @@ function AttendanceEditor({ record, onClose, onSaved, getAuthHeaders }) {
     }
   }
 
-  const studentPhone = pickStudentPhone(record);
-  const parentPhone = pickParentPhone(record);
-
   return (
     <div className="space-y-3">
       <div className="flex items-start justify-between gap-2">
@@ -278,13 +280,29 @@ function AttendanceEditor({ record, onClose, onSaved, getAuthHeaders }) {
             Edit Attendance Record
           </div>
           <div className="text-[11px] text-muted-foreground">
-            Record #{record.id} • {record.userName} • Grade{" "}
-            {record.userGrade || "N/A"}
+            {isSyntheticAbsent ? (
+              <>
+                Synthetic row (Absent) • {record.userName} • Grade{" "}
+                {record.userGrade || "N/A"}
+              </>
+            ) : (
+              <>
+                Record #{record.id} • {record.userName} • Grade{" "}
+                {record.userGrade || "N/A"}
+              </>
+            )}
           </div>
           <div className="text-[11px] text-muted-foreground">
             Student Phone: {studentPhone || "—"} • Parent Phone:{" "}
             {parentPhone || "—"}
           </div>
+          {isSyntheticAbsent && (
+            <div className="text-[11px] text-amber-600 mt-1">
+              This is an “absent” row generated for today. No DB record exists to
+              edit. Marking absent → present requires creating a record (not in
+              current API).
+            </div>
+          )}
         </div>
         <Button size="icon" variant="ghost" onClick={onClose}>
           <X className="w-4 h-4" />
@@ -295,7 +313,7 @@ function AttendanceEditor({ record, onClose, onSaved, getAuthHeaders }) {
       <div className="grid gap-2 md:grid-cols-3">
         <div className="md:col-span-2">
           <div className="text-[11px] text-muted-foreground">Status</div>
-          <Select value={status} onValueChange={setStatus}>
+          <Select value={status} onValueChange={setStatus} disabled={isSyntheticAbsent}>
             <SelectTrigger>
               <SelectValue placeholder="Select status" />
             </SelectTrigger>
@@ -306,7 +324,11 @@ function AttendanceEditor({ record, onClose, onSaved, getAuthHeaders }) {
             </SelectContent>
           </Select>
         </div>
-        <Button variant="outline" onClick={handleSetStatus} disabled={saving}>
+        <Button
+          variant="outline"
+          onClick={handleSetStatus}
+          disabled={saving || isSyntheticAbsent}
+        >
           <Save className="w-4 h-4 mr-2" />
           {saving ? "Saving..." : "Set Status"}
         </Button>
@@ -320,6 +342,7 @@ function AttendanceEditor({ record, onClose, onSaved, getAuthHeaders }) {
             type="datetime-local"
             value={checkInAt}
             onChange={(e) => setCheckInAt(e.target.value)}
+            disabled={isSyntheticAbsent}
           />
         </div>
         <div className="space-y-1">
@@ -328,30 +351,46 @@ function AttendanceEditor({ record, onClose, onSaved, getAuthHeaders }) {
             type="datetime-local"
             value={checkOutAt}
             onChange={(e) => setCheckOutAt(e.target.value)}
+            disabled={isSyntheticAbsent}
           />
         </div>
       </div>
 
       <div className="flex flex-wrap gap-2">
-        <Button variant="outline" onClick={handleSetTimes} disabled={saving}>
+        <Button
+          variant="outline"
+          onClick={handleSetTimes}
+          disabled={saving || isSyntheticAbsent}
+        >
           {saving ? "Saving..." : "Save Times"}
         </Button>
-        <Button variant="outline" onClick={handleForceCheckout} disabled={saving}>
+        <Button
+          variant="outline"
+          onClick={handleForceCheckout}
+          disabled={saving || isSyntheticAbsent}
+        >
           {saving ? "Saving..." : "Force Checkout"}
         </Button>
-        <Button variant="outline" onClick={handleReopenSession} disabled={saving}>
+        <Button
+          variant="outline"
+          onClick={handleReopenSession}
+          disabled={saving || isSyntheticAbsent}
+        >
           {saving ? "Saving..." : "Reopen Session"}
         </Button>
-        <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
+        <Button
+          variant="destructive"
+          onClick={handleDelete}
+          disabled={deleting || isSyntheticAbsent}
+        >
           {deleting ? "Deleting..." : "Delete Record"}
         </Button>
       </div>
 
       {message && (
         <div
-          className={`text-[11px] ${
-            message.type === "success" ? "text-emerald-600" : "text-red-600"
-          }`}
+          className={`text-[11px] ${message.type === "success" ? "text-emerald-600" : "text-red-600"
+            }`}
         >
           {message.text}
         </div>
@@ -416,8 +455,8 @@ function QrCardsPanel({ getAuthHeaders }) {
       const suffix = filters.today
         ? "today"
         : filters.dateFrom || filters.dateTo
-        ? `${filters.dateFrom || "x"}_to_${filters.dateTo || "x"}`
-        : "all";
+          ? `${filters.dateFrom || "x"}_to_${filters.dateTo || "x"}`
+          : "all";
 
       a.download = `student_qr_cards_${suffix}.pdf`;
       document.body.appendChild(a);
@@ -658,15 +697,24 @@ export default function AdminDashboard() {
       const statsJson = await statsRes.json();
       const recordsJson = await recordsRes.json();
 
+      // ✅ supports backend returning: []  OR  { range, data: [] }
+      const list = Array.isArray(recordsJson)
+        ? recordsJson
+        : Array.isArray(recordsJson?.data)
+          ? recordsJson.data
+          : [];
+
       setStats({
         totalStudents: statsJson.totalStudents ?? 0,
         presentToday: statsJson.presentToday ?? 0,
         attendanceRate: statsJson.attendanceRate ?? 0,
       });
-      setRecords(Array.isArray(recordsJson) ? recordsJson : []);
+      setRecords(list);
     } catch (err) {
       console.error("Failed to load admin data:", err);
-      setError("Failed to load attendance data. Please refresh or try again later.");
+      setError(
+        "Failed to load attendance data. Please refresh or try again later."
+      );
     } finally {
       setLoading(false);
     }
@@ -843,8 +891,15 @@ export default function AdminDashboard() {
 
   async function handleAddStudent(e) {
     e.preventDefault();
-    const { name, email, password, grade, rollNumber, phoneNumber, parentPhoneNumber } =
-      studentForm;
+    const {
+      name,
+      email,
+      password,
+      grade,
+      rollNumber,
+      phoneNumber,
+      parentPhoneNumber,
+    } = studentForm;
 
     if (!name || !email || !password) {
       setStudentAddMessage({
@@ -882,7 +937,10 @@ export default function AdminDashboard() {
       }
 
       await res.json();
-      setStudentAddMessage({ type: "success", text: "Student created successfully." });
+      setStudentAddMessage({
+        type: "success",
+        text: "Student created successfully.",
+      });
 
       setStudentForm({
         name: "",
@@ -936,7 +994,10 @@ export default function AdminDashboard() {
       }
 
       await res.json();
-      setStudentDeleteMessage({ type: "success", text: "Student deleted successfully." });
+      setStudentDeleteMessage({
+        type: "success",
+        text: "Student deleted successfully.",
+      });
       setStudentDeleteId("");
 
       await reloadAdminData();
@@ -954,7 +1015,10 @@ export default function AdminDashboard() {
   async function handleImportCsv(e) {
     e.preventDefault();
     if (!importFile) {
-      setImportResult({ type: "error", text: "Please choose a CSV file to import." });
+      setImportResult({
+        type: "error",
+        text: "Please choose a CSV file to import.",
+      });
       return;
     }
 
@@ -980,11 +1044,9 @@ export default function AdminDashboard() {
       const json = await res.json();
       setImportResult({
         type: "success",
-        text: `Imported successfully. Users: ${json.summary?.createdUsers ?? 0}, Students: ${
-          json.summary?.createdStudents ?? 0
-        }, Skipped: ${json.summary?.skippedExisting ?? 0}, Errors: ${
-          json.summary?.rowsWithErrors ?? 0
-        }`,
+        text: `Imported successfully. Users: ${json.summary?.createdUsers ?? 0}, Students: ${json.summary?.createdStudents ?? 0
+          }, Skipped: ${json.summary?.skippedExisting ?? 0}, Errors: ${json.summary?.rowsWithErrors ?? 0
+          }`,
         raw: json,
       });
 
@@ -1096,7 +1158,7 @@ export default function AdminDashboard() {
                 />
               </div>
 
-              {/* ✅ Grade dropdown already */}
+              {/* Grade dropdown */}
               <Select value={gradeFilter} onValueChange={setGradeFilter}>
                 <SelectTrigger className="w-[160px]">
                   <SelectValue placeholder="Filter Grade" />
@@ -1173,20 +1235,29 @@ export default function AdminDashboard() {
                       </TableRow>
                     ) : (
                       filteredRecords.map((record) => {
+                        const statusLower = String(record.status || "")
+                          .toLowerCase()
+                          .trim();
+                        const isAbsent = statusLower === "absent";
+                        const isLate = statusLower === "late";
+                        const isPresent = statusLower === "present";
+                        const isEditable = !!record.id; // ✅ absent rows are synthetic (id null)
+
+
                         const checkInDate = safeDate(record.checkInAt || record.date);
-                        const checkOutDate = safeDate(
-                          record.checkOutAt || record.checkOutTime
-                        );
+                        const checkOutDate = safeDate(record.checkOutAt);
 
                         const dateStr = checkInDate
                           ? format(checkInDate, "MMM dd, yyyy")
                           : "—";
-                        const checkInStr = checkInDate
-                          ? format(checkInDate, "hh:mm a")
-                          : "—";
-                        const checkOutStr = checkOutDate
-                          ? format(checkOutDate, "hh:mm a")
-                          : "—";
+                        const checkInStr =
+                          !isAbsent && checkInDate
+                            ? format(checkInDate, "hh:mm a")
+                            : "—";
+                        const checkOutStr =
+                          !isAbsent && checkOutDate
+                            ? format(checkOutDate, "hh:mm a")
+                            : "—";
 
                         const statusText = (record.status || "")
                           .toString()
@@ -1196,29 +1267,50 @@ export default function AdminDashboard() {
                         const parentPhone = pickParentPhone(record);
 
                         return (
-                          <TableRow key={record.id}>
+                          <TableRow
+                            key={record.id ?? `absent-${record.userId}`}
+                            className={isAbsent ? "bg-red-50/70 hover:bg-red-50" : ""}
+                          >
+
                             <TableCell className="font-medium">
                               <div className="flex flex-col">
-                                <span>{record.userName}</span>
+                                <span className={isAbsent ? "text-red-700" : ""}>{record.userName}</span>
+
                                 <span className="text-xs text-muted-foreground">
                                   {record.userId}
                                 </span>
                               </div>
                             </TableCell>
                             <TableCell>
-                              <Badge variant="secondary" className="rounded-sm font-normal">
+                              <Badge
+                                variant="secondary"
+                                className="rounded-sm font-normal"
+                              >
                                 {record.userGrade || "N/A"}
                               </Badge>
                             </TableCell>
-                            <TableCell className="text-xs">{studentPhone || "—"}</TableCell>
-                            <TableCell className="text-xs">{parentPhone || "—"}</TableCell>
+                            <TableCell className="text-xs">
+                              {studentPhone || "—"}
+                            </TableCell>
+                            <TableCell className="text-xs">
+                              {parentPhone || "—"}
+                            </TableCell>
                             <TableCell>{dateStr}</TableCell>
                             <TableCell>{checkInStr}</TableCell>
                             <TableCell>{checkOutStr}</TableCell>
                             <TableCell>
-                              <Badge variant="outline" className="text-xs font-normal">
+                              <Badge
+                                variant="outline"
+                                className={`text-xs font-normal ${isAbsent
+                                  ? "border-red-300 text-red-700 bg-red-50"
+                                  : isLate
+                                    ? "border-amber-300 text-amber-700 bg-amber-50"
+                                    : "border-emerald-300 text-emerald-700 bg-emerald-50"
+                                  }`}
+                              >
                                 {statusText || "—"}
                               </Badge>
+
                             </TableCell>
 
                             <TableCell className="text-right">
@@ -1226,6 +1318,12 @@ export default function AdminDashboard() {
                                 <Button
                                   size="sm"
                                   variant="outline"
+                                  disabled={!isEditable}
+                                  title={
+                                    isEditable
+                                      ? "Edit"
+                                      : "Absent row (no DB record to edit)"
+                                  }
                                   onClick={() => openEditor(record)}
                                 >
                                   <Pencil className="w-4 h-4 mr-1" />
@@ -1296,7 +1394,7 @@ export default function AdminDashboard() {
                   }
                 />
 
-                {/* ✅ Grade is now dropdown */}
+                {/* Grade dropdown */}
                 <Select
                   value={reportFilters.grade || "all"}
                   onValueChange={(value) =>
@@ -1324,7 +1422,11 @@ export default function AdminDashboard() {
                   placeholder="Status (present/late...)"
                   value={reportFilters.status}
                   onChange={(e) =>
-                    setReportFilters((p) => ({ ...p, status: e.target.value, page: 1 }))
+                    setReportFilters((p) => ({
+                      ...p,
+                      status: e.target.value,
+                      page: 1,
+                    }))
                   }
                 />
 
@@ -1344,9 +1446,7 @@ export default function AdminDashboard() {
                 />
               </div>
 
-              {reportError && (
-                <div className="text-xs text-red-600">{reportError}</div>
-              )}
+              {reportError && <div className="text-xs text-red-600">{reportError}</div>}
 
               {reportMeta && (
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -1423,12 +1523,8 @@ export default function AdminDashboard() {
                                 </div>
                               </TableCell>
                               <TableCell>{row.grade || "N/A"}</TableCell>
-                              <TableCell className="text-xs">
-                                {studentPhone || "—"}
-                              </TableCell>
-                              <TableCell className="text-xs">
-                                {parentPhone || "—"}
-                              </TableCell>
+                              <TableCell className="text-xs">{studentPhone || "—"}</TableCell>
+                              <TableCell className="text-xs">{parentPhone || "—"}</TableCell>
                               <TableCell>
                                 {inDate ? format(inDate, "MMM dd, yyyy") : "—"}
                               </TableCell>
@@ -1439,10 +1535,7 @@ export default function AdminDashboard() {
                                 {outDate ? format(outDate, "hh:mm a") : "—"}
                               </TableCell>
                               <TableCell>
-                                <Badge
-                                  variant="outline"
-                                  className="text-xs font-normal"
-                                >
+                                <Badge variant="outline" className="text-xs font-normal">
                                   {(row.status || "").toUpperCase()}
                                 </Badge>
                               </TableCell>
@@ -1451,9 +1544,7 @@ export default function AdminDashboard() {
                                 <Button
                                   size="sm"
                                   variant="outline"
-                                  onClick={() =>
-                                    openEditor(reportRowToEditorRecord(row))
-                                  }
+                                  onClick={() => openEditor(reportRowToEditorRecord(row))}
                                 >
                                   <Pencil className="w-4 h-4 mr-1" />
                                   Edit
@@ -1528,11 +1619,10 @@ export default function AdminDashboard() {
                   </Button>
                   {importResult && (
                     <p
-                      className={`text-[11px] mt-1 ${
-                        importResult.type === "success"
-                          ? "text-emerald-600"
-                          : "text-red-600"
-                      }`}
+                      className={`text-[11px] mt-1 ${importResult.type === "success"
+                        ? "text-emerald-600"
+                        : "text-red-600"
+                        }`}
                     >
                       {importResult.text}
                     </p>
@@ -1552,17 +1642,13 @@ export default function AdminDashboard() {
                   <Input
                     placeholder="Full name"
                     value={studentForm.name}
-                    onChange={(e) =>
-                      setStudentForm((p) => ({ ...p, name: e.target.value }))
-                    }
+                    onChange={(e) => setStudentForm((p) => ({ ...p, name: e.target.value }))}
                   />
                   <Input
                     type="email"
                     placeholder="Email"
                     value={studentForm.email}
-                    onChange={(e) =>
-                      setStudentForm((p) => ({ ...p, email: e.target.value }))
-                    }
+                    onChange={(e) => setStudentForm((p) => ({ ...p, email: e.target.value }))}
                   />
                   <Input
                     type="password"
@@ -1574,14 +1660,10 @@ export default function AdminDashboard() {
                   />
 
                   <div className="grid grid-cols-2 gap-2">
-                    {/* ✅ Grade dropdown */}
                     <Select
                       value={studentForm.grade || "none"}
                       onValueChange={(value) =>
-                        setStudentForm((p) => ({
-                          ...p,
-                          grade: value === "none" ? "" : value,
-                        }))
+                        setStudentForm((p) => ({ ...p, grade: value === "none" ? "" : value }))
                       }
                     >
                       <SelectTrigger>
@@ -1601,10 +1683,7 @@ export default function AdminDashboard() {
                       placeholder="Roll no. (optional)"
                       value={studentForm.rollNumber}
                       onChange={(e) =>
-                        setStudentForm((p) => ({
-                          ...p,
-                          rollNumber: e.target.value,
-                        }))
+                        setStudentForm((p) => ({ ...p, rollNumber: e.target.value }))
                       }
                     />
                   </div>
@@ -1614,10 +1693,7 @@ export default function AdminDashboard() {
                       placeholder="Student phone (optional)"
                       value={studentForm.phoneNumber}
                       onChange={(e) =>
-                        setStudentForm((p) => ({
-                          ...p,
-                          phoneNumber: e.target.value,
-                        }))
+                        setStudentForm((p) => ({ ...p, phoneNumber: e.target.value }))
                       }
                     />
                     <Input
@@ -1632,21 +1708,15 @@ export default function AdminDashboard() {
                     />
                   </div>
 
-                  <Button
-                    type="submit"
-                    size="sm"
-                    className="w-full"
-                    disabled={studentAddLoading}
-                  >
+                  <Button type="submit" size="sm" className="w-full" disabled={studentAddLoading}>
                     {studentAddLoading ? "Creating…" : "Create Student"}
                   </Button>
                   {studentAddMessage && (
                     <p
-                      className={`text-[11px] mt-1 ${
-                        studentAddMessage.type === "success"
-                          ? "text-emerald-600"
-                          : "text-red-600"
-                      }`}
+                      className={`text-[11px] mt-1 ${studentAddMessage.type === "success"
+                        ? "text-emerald-600"
+                        : "text-red-600"
+                        }`}
                     >
                       {studentAddMessage.text}
                     </p>
@@ -1686,11 +1756,10 @@ export default function AdminDashboard() {
                 </div>
                 {studentDeleteMessage && (
                   <p
-                    className={`text-[11px] ${
-                      studentDeleteMessage.type === "success"
-                        ? "text-emerald-600"
-                        : "text-red-600"
-                    }`}
+                    className={`text-[11px] ${studentDeleteMessage.type === "success"
+                      ? "text-emerald-600"
+                      : "text-red-600"
+                      }`}
                   >
                     {studentDeleteMessage.text}
                   </p>
